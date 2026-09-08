@@ -6,6 +6,7 @@ import type { DB } from '../store/db.js'
 import { makeRequireAuth } from './auth.js'
 import { registerUserRoutes } from './routes/users.js'
 import { registerProjectRoutes } from './routes/projects.js'
+import { registerResourceRoutes } from './routes/resources.js'
 
 export interface BuildOpts { config: Config; db: DB }
 
@@ -20,7 +21,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
     }
   })
   app.setErrorHandler((err, _req, reply) => {
-    const status = (err as any).status ?? 500
+    const status = (err as any).status ?? (err as any).statusCode ?? 500
     const code = (err as any).code ?? 'INTERNAL'
     const envelope: any = { error: { code, message: err.message } }
     if ((err as any).details !== undefined) envelope.error.details = (err as any).details
@@ -30,6 +31,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   app.decorate('requireAuth', makeRequireAuth(opts.db))
   registerUserRoutes(app, opts.db)
   registerProjectRoutes(app, opts.db)
+  registerResourceRoutes(app, opts.db)
   app.get('/api/health', async () => ({ status: 'ok' }))
   return app
 }
