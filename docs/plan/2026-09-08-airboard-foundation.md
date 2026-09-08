@@ -1303,15 +1303,15 @@ git add -A && git commit -m "feat: commit bindings store and manual API"
 ```
 ---
 
-### Task 9: GitLab push webhook
+### Task 9: GitLab connector plugin — webhook + commit deep-links
 
 **Files:**
-- Create: `src/http/routes/gitlab.ts`, `tests/api/gitlab.test.ts`
-- Modify: `src/http/app.ts` (register)
+- Create: `src/plugins/types.ts`, `src/plugins/registry.ts`, `src/plugins/gitlab.ts`, `tests/api/gitlab.test.ts`, `tests/api/plugins.test.ts`
+- Modify: `src/http/app.ts` (register connector + `GET /api/plugins`), `src/http/routes/resources.ts` (enrich bindings with `commit_url`)
 
 **Interfaces:**
 - Consumes: Task 2 `parseRefs`/`parseId`, Task 8 `addBinding`, Task 3 `webhook_events` table, Task 5 projects.
-- Produces: `handleGitlabPush(db, payload): { bound: number; duplicates: number }` exported from `src/http/routes/gitlab.ts`; route `POST /api/webhooks/gitlab` — no bearer auth; verifies `X-Gitlab-Token === config.gitlabWebhookSecret` (503 `NOT_CONFIGURED` if secret empty; 401 `WEBHOOK_SECRET` on mismatch); always 200 with `{ bound, duplicates }`.
+- Produces (ADR 0004): in `src/plugins/types.ts`: `interface ConnectorPlugin { id: string; displayName: string; webhookPath?: string; verifyWebhook(req: FastifyRequest): void; handleWebhook(db: DB, payload: unknown): unknown; commitUrl?(repoUrl: string, sha: string): string }` — the extension point for future connectors. In `src/plugins/registry.ts`: `registerConnector(app, db, plugin): void` (idempotent per id; mounts `POST <webhookPath>` calling verify then handle), `listConnectors(): ConnectorPlugin[]`, `commitUrlFor(repoUrl, sha): string | null` (first connector offering commitUrl). In `src/plugins/gitlab.ts`: `createGitlabPlugin(config): ConnectorPlugin` (id `gitlab`, webhookPath `/api/plugins/gitlab/webhook`) and `handleGitlabPush(db, payload): { bound: number; duplicates: number }`. Route `GET /api/plugins` (auth) → `[{ id, display_name, webhook_url? }]`. Webhook: no bearer auth; verifies `X-Gitlab-Token === config.gitlabWebhookSecret` (503 `NOT_CONFIGURED` if secret empty; 401 `WEBHOOK_SECRET` on mismatch); always 200 with `{ bound, duplicates }`. Bindings GET responses gain `commit_url = <repo-without-.git>/-/commit/<sha>`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1336,61 +1336,127 @@ async function seed(app: any, auth: any) {
 describe('gitlab webhook', () => {
   it('rejects missing or wrong secret', async () => {
     const { app } = await setup()
-    const noTok = await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', payload: PUSH('x') })
+    const noTok = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', payload: PUSH('x') })
     expect(noTok.statusCode).toBe(401)
-    const badTok = await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', headers: { 'x-gitlab-token': 'wrong' }, payload: PUSH('x') })
+    const badTok = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 'wrong' }, payload: PUSH('x') })
     expect(badTok.statusCode).toBe(401)
     expect(badTok.json().error.code).toBe('WEBHOOK_SECRET')
   })
   it('binds commits whose messages reference resource ids', async () => {
     const { app, auth } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', headers: { 'x-gitlab-token': 's' }, payload: PUSH('implement ADR-1 and closes ISSUE-1') })
+    const res = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('implement ADR-1 and closes ISSUE-1') })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ bound: 2, duplicates: 0 })
     const b1 = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/bindings', headers: auth })
     expect(b1.json()[0].sha).toBe('deadbeef')
+    expect(b1.json()[0].commit_url).toBe('https://gitlab.example.com/team/core/-/commit/deadbeef')
   })
   it('is idempotent on repeated event_uuid', async () => {
     const { app } = await setup()
     await seed(app, auth)
     const h = { 'x-gitlab-token': 's' }
-    await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', headers: h, payload: PUSH('refs ADR-1') })
-    const dup = await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', headers: h, payload: PUSH('refs ADR-1') })
+    await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    const dup = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
     expect(dup.json()).toEqual({ bound: 0, duplicates: 1 })
   })
   it('same commit binding another resource is not a duplicate; unbound refs are ignored', async () => {
     const { app } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', headers: { 'x-gitlab-token': 's' }, payload: PUSH('ADR-1 ISSUE-1 ADR-99') })
+    const res = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('ADR-1 ISSUE-1 ADR-99') })
     expect(res.json()).toEqual({ bound: 2, duplicates: 0 })
   })
   it('ignores repos not bound to any project', async () => {
     const { app } = await setup()
     const p = { ...PUSH('refs ADR-1'), project: { git_http_url: 'https://gitlab.example.com/other/x.git' } }
-    const res = await app.inject({ method: 'POST', url: '/api/webhooks/gitlab', headers: { 'x-gitlab-token': 's' }, payload: p })
+    const res = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: p })
     expect(res.statusCode).toBe(200)
     expect(res.json().bound).toBe(0)
   })
 })
 ```
 
+```ts
+// tests/api/plugins.test.ts
+import { describe, it, expect } from 'vitest'
+import { setup } from '../helpers.js'
+import { createGitlabPlugin } from '../../src/plugins/gitlab.js'
+
+describe('connector registry', () => {
+  it('lists the gitlab connector with its webhook url', async () => {
+    const { app, auth } = await setup()
+    const res = await app.inject({ method: 'GET', url: '/api/plugins', headers: auth })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual([{ id: 'gitlab', display_name: 'GitLab', webhook_url: '/api/plugins/gitlab/webhook' }])
+  })
+  it('requires auth', async () => {
+    const { app } = await setup()
+    const res = await app.inject({ method: 'GET', url: '/api/plugins' })
+    expect(res.statusCode).toBe(401)
+  })
+  it('derives commit urls, stripping .git', () => {
+    const p = createGitlabPlugin({ dbPath: ':memory:', port: 1, baseUrl: 'http://x', gitlabWebhookSecret: 's' })
+    expect(p.commitUrl!('https://gitlab.example.com/team/core.git', 'abc')).toBe('https://gitlab.example.com/team/core/-/commit/abc')
+  })
+})
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/gitlab.test.ts`
-Expected: FAIL — route missing.
+Run: `npx vitest run tests/api/gitlab.test.ts tests/api/plugins.test.ts`
+Expected: FAIL — routes missing.
 
 - [ ] **Step 3: Implement**
 
 ```ts
-// src/http/routes/gitlab.ts
+// src/plugins/types.ts — the extension point for future connectors (ADR 0004)
+import type { FastifyRequest } from 'fastify'
+import type { DB } from '../store/db.js'
+
+export interface ConnectorPlugin {
+  id: string
+  displayName: string
+  webhookPath?: string                                  // mounted as POST <webhookPath>
+  verifyWebhook(req: FastifyRequest): void              // throw httpError(...) to reject
+  handleWebhook(db: DB, payload: unknown): unknown      // returns the 200 response body
+  commitUrl?(repoUrl: string, sha: string): string      // external deep-link derivation
+}
+```
+
+```ts
+// src/plugins/registry.ts
 import type { FastifyInstance } from 'fastify'
-import type { DB } from '../../store/db.js'
-import type { Config } from '../../config.js'
-import { parseRefs } from '../../domain/refs.js'
-import { parseId } from '../../domain/ids.js'
-import { addBinding } from '../../store/bindings.js'
-import { httpError } from '../errors.js'
+import type { ConnectorPlugin } from './types.js'
+import type { DB } from '../store/db.js'
+
+const connectors: ConnectorPlugin[] = []
+
+export function registerConnector(app: FastifyInstance, db: DB, plugin: ConnectorPlugin): void {
+  if (!connectors.some((c) => c.id === plugin.id)) connectors.push(plugin)
+  if (plugin.webhookPath) {
+    app.post(plugin.webhookPath, async (req) => {
+      plugin.verifyWebhook(req)
+      return plugin.handleWebhook(db, req.body)
+    })
+  }
+}
+export function listConnectors(): ConnectorPlugin[] { return [...connectors] }
+export function commitUrlFor(repoUrl: string, sha: string): string | null {
+  for (const c of connectors) if (c.commitUrl) return c.commitUrl(repoUrl, sha)
+  return null
+}
+```
+
+```ts
+// src/plugins/gitlab.ts
+import type { FastifyRequest } from 'fastify'
+import type { Config } from '../config.js'
+import type { DB } from '../store/db.js'
+import type { ConnectorPlugin } from './types.js'
+import { parseRefs } from '../domain/refs.js'
+import { parseId } from '../domain/ids.js'
+import { addBinding } from '../store/bindings.js'
+import { httpError } from '../http/errors.js'
 
 export function handleGitlabPush(db: DB, payload: any): { bound: number; duplicates: number } {
   return db.transaction(() => {
@@ -1424,21 +1490,47 @@ export function handleGitlabPush(db: DB, payload: any): { bound: number; duplica
   })()
 }
 
-export function registerGitlabRoutes(app: FastifyInstance, db: DB, config: Config) {
-  app.post('/api/webhooks/gitlab', async (req) => {
-    if (!config.gitlabWebhookSecret) throw httpError(503, 'NOT_CONFIGURED', 'GITLAB_WEBHOOK_SECRET is not configured')
-    const token = req.headers['x-gitlab-token']
-    if (token !== config.gitlabWebhookSecret) throw httpError(401, 'WEBHOOK_SECRET', 'invalid X-Gitlab-Token')
-    return handleGitlabPush(db, req.body)
-  })
+export function createGitlabPlugin(config: Config): ConnectorPlugin {
+  return {
+    id: 'gitlab',
+    displayName: 'GitLab',
+    webhookPath: '/api/plugins/gitlab/webhook',
+    verifyWebhook(req: FastifyRequest): void {
+      if (!config.gitlabWebhookSecret) throw httpError(503, 'NOT_CONFIGURED', 'GITLAB_WEBHOOK_SECRET is not configured')
+      if (req.headers['x-gitlab-token'] !== config.gitlabWebhookSecret) throw httpError(401, 'WEBHOOK_SECRET', 'invalid X-Gitlab-Token')
+    },
+    handleWebhook(db: DB, payload: any) {
+      return handleGitlabPush(db, payload)
+    },
+    commitUrl(repoUrl: string, sha: string): string {
+      return repoUrl.replace(/\.git$/, '') + '/-/commit/' + sha
+    }
+  }
 }
 ```
 
-Register in `buildApp`: `registerGitlabRoutes(app, opts.db, opts.config)`.
+(`handleGitlabPush` stays in this file exactly as written above the plugin — unchanged.)
+
+Wire up in `buildApp` (replacing the old registration line):
+
+```ts
+import { createGitlabPlugin } from '../plugins/gitlab.js'
+import { registerConnector, listConnectors } from '../plugins/registry.js'
+// after other route registrations:
+registerConnector(app, opts.db, createGitlabPlugin(opts.config))
+app.get('/api/plugins', { preHandler: [app.requireAuth] }, async () =>
+  listConnectors().map((c) => ({ id: c.id, display_name: c.displayName, webhook_url: c.webhookPath })))
+```
+
+Enrich bindings in `src/http/routes/resources.ts` GET bindings route (import `commitUrlFor` from `../../plugins/registry.js`):
+
+```ts
+return listBindings(db, r.row.id).map((b) => ({ ...b, commit_url: commitUrlFor(b.repo_url, b.sha) }))
+```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/gitlab.test.ts` then `npx vitest run`
+Run: `npx vitest run tests/api/gitlab.test.ts tests/api/plugins.test.ts` then `npx vitest run`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1543,7 +1635,7 @@ export function agentInstructions(baseUrl: string) {
       projects: '/api/projects', resources: '/api/projects/{key}/resources', search: '/api/search?q=',
       revisions: '/api/projects/{key}/resources/{id}/revisions',
       bindings: '/api/projects/{key}/resources/{id}/bindings',
-      webhook: '/api/webhooks/gitlab', openapi: '/openapi.json', agents_md: '/AGENTS.md'
+      webhook: '/api/plugins/gitlab/webhook', plugins: '/api/plugins', openapi: '/openapi.json', agents_md: '/AGENTS.md'
     },
     openapi_url: '/openapi.json',
     agents_md_url: '/AGENTS.md'
@@ -1698,6 +1790,7 @@ import { verifyToken, createToken, revokeToken, listTokens } from '../../store/u
 import { listProjects, getProjectByKey } from '../../store/projects.js'
 import { getResourceInternal, listResources, updateResource, listRevisions, listBindings } from '../../store/resources.js'
 import { webUser } from '../auth.js'
+import { commitUrlFor } from '../../plugins/registry.js'
 import { esc, layout, renderMarkdown } from '../../web/html.js'
 import { httpError } from '../errors.js'
 
@@ -1745,7 +1838,7 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
     const r = getResourceInternal(db, p.id, req.params.id)
     if (!r) throw httpError(404, 'NOT_FOUND', 'resource not found')
     const revs = listRevisions(db, r.row.id).map((v: any) => '<tr><td>' + v.rev + '</td><td>' + esc(v.title) + '</td><td>' + esc(v.created_at) + '</td></tr>').join('')
-    const binds = listBindings(db, r.row.id).map((b) => '<tr><td>' + esc(b.repo_url) + '</td><td><code>' + esc(b.sha) + '</code></td><td>' + esc(b.pushed_at ?? '') + '</td></tr>').join('')
+    const binds = listBindings(db, r.row.id).map((b) => '<tr><td>' + esc(b.repo_url) + '</td><td><code><a href="' + esc(commitUrlFor(b.repo_url, b.sha) ?? '#') + '" target="_blank">' + esc(b.sha) + '</a></code></td><td>' + esc(b.pushed_at ?? '') + '</td></tr>').join('')
     const NEXT: Record<string, string[]> = { draft: ['active', 'cancelled'], active: ['done', 'cancelled'], done: [], cancelled: [] }
     const buttons = NEXT[r.view.status]
       .map((s) => '<form method="post" action="/p/' + esc(p.key) + '/' + r.view.id + '/status" style="display:inline"><input type="hidden" name="status" value="' + s + '"><button>' + s + '</button></form>').join(' ')
@@ -1888,7 +1981,7 @@ With an empty database the service creates an admin user and prints a one-time b
 
 ## GitLab
 
-In your GitLab project: Settings -> Webhooks -> add <BASE_URL>/api/webhooks/gitlab, push events, secret = GITLAB_WEBHOOK_SECRET. Set the AirBoard project's gitlab_repo_url to the repo's HTTP URL (PATCH /api/projects/KEY). Commit messages mentioning ADR-12, ISSUE-345 etc. are auto-bound.
+In your GitLab project: Settings -> Webhooks -> add <BASE_URL>/api/plugins/gitlab/webhook, push events, secret = GITLAB_WEBHOOK_SECRET. Set the AirBoard project's gitlab_repo_url to the repo's HTTP URL (PATCH /api/projects/KEY). Commit messages mentioning ADR-12, ISSUE-345 etc. are auto-bound.
 
 ## Agents
 

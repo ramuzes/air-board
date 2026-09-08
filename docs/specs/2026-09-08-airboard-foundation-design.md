@@ -42,7 +42,7 @@ A self-hosted AirBoard service (single team, <20 Users) that:
 
 ### Solution
 
-A single Node.js service exposing: a REST API under `/api` (bearer-token auth), server-rendered web UI at `/`, GitLab webhook at `/api/webhooks/gitlab`, and Agent Instructions at `/api/agents/instructions` (JSON + OpenAPI) and `/AGENTS.md` (human-readable markdown). All state lives in one SQLite database file.
+A single Node.js service exposing: a REST API under `/api` (bearer-token auth), server-rendered web UI at `/`, connector-plugin webhooks at `/api/plugins/<id>/webhook` (gitlab is the first connector, per ADR 0004), and Agent Instructions at `/api/agents/instructions` (JSON + OpenAPI) and `/AGENTS.md` (human-readable markdown). All state lives in one SQLite database file.
 
 ### Implementation decisions
 
@@ -81,12 +81,13 @@ A single Node.js service exposing: a REST API under `/api` (bearer-token auth), 
 - `GET|PATCH /resources/:id` — `:id` is the **public** `ADR-42`-style ID (with optional project scoping `/projects/:key/resources/:id`). PATCH: title/content changes append a revision; status triggers a lifecycle transition. A PATCH carrying both content and status applies both in one transaction (revision appended and transition validated together; if the transition is invalid the whole request is 422 and no revision is written).
 - `GET /resources/:id/revisions`, `GET /resources/:id/revisions/:rev`
 - `POST /resources/:id/bindings` (manual commit binding: repo_url, sha) and `GET /resources/:id/bindings`
-- `POST /webhooks/gitlab` (unauthenticated but secret-token-verified per GitLab convention — the shared secret is configured via an environment variable, e.g. `GITLAB_WEBHOOK_SECRET`, and checked against GitLab's `X-Gitlab-Token` header) — on push events, parse every commit message for `(ADR|PRD|SPEC|PLAN|ISSUE)-\d+` tokens scoped to the project bound to that GitLab repo, and record bindings idempotently. The webhook always responds 200 with `{ bound: <n>, deduplicated: <bool> }` so GitLab does not retry.
+- **Connector plugins:** external-service integrations implement a small `ConnectorPlugin` interface (id, display name, optional webhook, optional external-URL derivation such as commit deep-links) and register in a plugin registry at startup (ADR 0004). Each connector's webhook is mounted at the predictable path `POST /api/plugins/<id>/webhook`. `GET /api/plugins` (authenticated) lists registered connectors with their webhook URLs for agent discovery.
+- The **gitlab** connector mounts `POST /api/plugins/gitlab/webhook` (unauthenticated but secret-token-verified per GitLab convention — the shared secret is configured via an environment variable, e.g. `GITLAB_WEBHOOK_SECRET`, and checked against GitLab's `X-Gitlab-Token` header) — on push events, parse every commit message for `(ADR|PRD|SPEC|PLAN|ISSUE)-\d+` tokens scoped to the project bound to that GitLab repo, and record bindings idempotently. The webhook always responds 200 with `{ bound: <n>, deduplicated: <bool> }` so GitLab does not retry. The connector also derives direct GitLab links from the project's configured `gitlab_repo_url`: binding responses include `commit_url = <repo-without-.git>/-/commit/<sha>` so the UI and agents can redirect straight to GitLab.
 - `GET /agents/instructions` — JSON: base_url, auth scheme, token acquisition steps, ID conventions, lifecycle rules, link to OpenAPI JSON, link to AGENTS.md.
 - `GET /openapi.json`, `GET /AGENTS.md` (plain markdown, same content orientation as the JSON instructions).
 - Error envelope: `{ error: { code, message, details? } }` with proper status codes; 404 for unknown IDs, 422 for invalid transitions/schemas.
 
-**Project ↔ GitLab repo binding:** a project field `gitlab_repo_url`; the webhook matches incoming pushes to projects by repo URL before parsing refs. (A repo maps to at most one project at launch.)
+**Project ↔ GitLab repo binding:** a project field `gitlab_repo_url`; the gitlab connector matches incoming pushes to projects by repo URL before parsing refs. (A repo maps to at most one project at launch.) The same URL powers commit deep-links (`commit_url`) on bindings.
 
 **First-run bootstrap:** if no users exist, the service prints/creates a bootstrap admin token on first start (once, logged to console) so the initial User and tokens can be created without seed scripts.
 
