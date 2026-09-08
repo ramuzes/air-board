@@ -2,9 +2,8 @@
 import Fastify, { FastifyInstance } from 'fastify'
 import cookie from '@fastify/cookie'
 import type { Config } from '../config.js'
-import type { DB } from '../store/db.js'
 
-export interface BuildOpts { config: Config; db?: DB }
+export interface BuildOpts { config: Config }
 
 export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   const app = Fastify({ logger: false })
