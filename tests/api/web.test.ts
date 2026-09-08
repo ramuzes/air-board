@@ -23,6 +23,20 @@ describe('web ui', () => {
     expect(home.statusCode).toBe(200)
     expect(home.body).toContain('Projects')
   })
+  it('accepts form-encoded bodies like real html form posts', async () => {
+    const { app, auth, inject } = await setup()
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'T', markdown: 'hello' } })
+    const tok = (auth.authorization.match(/Bearer (.+)/) as any)[1]
+    const login = await inject({ method: 'POST', url: '/login', headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: 'token=' + tok })
+    expect(login.statusCode).toBe(302)
+    const cookie = withCookie(login)
+    const st = await inject({ method: 'POST', url: '/p/CORE/ADR-1/status', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'status=active' })
+    expect(st.statusCode).toBe(302)
+    const after = await inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
+    expect(after.statusCode).toBe(200)
+    expect(after.body).toContain('active')
+  })
   it('resource detail renders markdown, escapes html, transitions', async () => {
     const { app, auth, inject } = await setup()
     await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })

@@ -23,7 +23,8 @@ export async function setup(): Promise<{ app: FastifyInstance; db: DB; auth: { a
         ...(opts.payload !== undefined ? { 'content-type': 'application/json' } : {}),
         ...(opts.headers ?? {})
       },
-      body: opts.payload !== undefined ? JSON.stringify(opts.payload) : undefined,
+      // string payloads pass through raw (e.g. pre-encoded form bodies); objects are JSON-encoded
+      body: opts.payload !== undefined ? (typeof opts.payload === 'string' ? opts.payload : JSON.stringify(opts.payload)) : undefined,
       redirect: 'manual'
     })
     const body = await res.text()

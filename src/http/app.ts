@@ -1,6 +1,7 @@
 // src/http/app.ts
 import Fastify, { FastifyInstance } from 'fastify'
 import cookie from '@fastify/cookie'
+import formbody from '@fastify/formbody'
 import swagger from '@fastify/swagger'
 import type { Config } from '../config.js'
 import type { DB } from '../store/db.js'
@@ -20,6 +21,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   // inside buildApp, first registration:
   await app.register(swagger, { openapi: { info: { title: 'AirBoard API', version: '0.1.0' } } })
   await app.register(cookie)
+  await app.register(formbody)
   app.setNotFoundHandler((req, reply) => {
     if (req.url.startsWith('/api') || req.url === '/openapi.json' || req.url === '/AGENTS.md') {
       reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Route ' + req.method + ':' + req.url + ' not found' } })
