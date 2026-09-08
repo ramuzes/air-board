@@ -2,7 +2,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { DB } from '../../store/db.js'
 import { getProjectByKey } from '../../store/projects.js'
-import { createResource, listResources, getResourceInternal, listRevisions, getRevision, searchAll, updateResourceContent } from '../../store/resources.js'
+import { createResource, listResources, getResourceInternal, listRevisions, getRevision, searchAll, updateResource } from '../../store/resources.js'
 import { httpError } from '../errors.js'
 
 export function projectOr404(db: DB, key: string) {
@@ -34,11 +34,13 @@ export function registerResourceRoutes(app: FastifyInstance, db: DB) {
 
   app.patch('/api/projects/:key/resources/:id', {
     preHandler: [app.requireAuth],
-    schema: { body: { type: 'object', minProperties: 1, properties: { title: { type: 'string', minLength: 1 }, content_markdown: { type: 'string' } } } }
+    schema: { body: { type: 'object', properties: {
+      title: { type: 'string', minLength: 1 }, content_markdown: { type: 'string' },
+      status: { type: 'string', enum: ['draft', 'active', 'done', 'cancelled'] } } } }
   }, async (req) => {
     const { key, id } = req.params as any
     const p = projectOr404(db, key)
-    return updateResourceContent(db, p.id, id, req.body as any, (req as any).user.id)
+    return updateResource(db, { projectId: p.id, publicId: id, patch: req.body as any, userId: (req as any).user.id })
   })
 
   app.get('/api/search', { preHandler: [app.requireAuth] }, async (req) => {

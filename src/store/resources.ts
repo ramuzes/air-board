@@ -2,6 +2,7 @@
 import type { DB } from './db.js'
 import { httpError } from '../http/errors.js'
 import { formatId, parseId, type Kind } from '../domain/ids.js'
+import { canTransition, type Status } from '../domain/lifecycle.js'
 
 export interface ResourceView {
   id: string; kind: string; number: number; project_key: string; title: string; status: string
@@ -55,16 +56,27 @@ export function listResources(db: DB, f: { projectId: number; kind?: string; sta
   return (db.prepare(sql).all(...params) as any[]).map((r) => viewByRowId(db, r.rid))
 }
 
-export function updateResourceContent(db: DB, projectId: number, publicId: string, patch: { title?: string; content_markdown?: string }, userId: number): ResourceView {
+export function updateResource(db: DB, input: { projectId: number; publicId: string; patch: { title?: string; content_markdown?: string; status?: string }; userId: number }): ResourceView {
   return db.transaction(() => {
-    const r = getResourceInternal(db, projectId, publicId)
-    if (!r) throw httpError(404, 'NOT_FOUND', 'resource ' + publicId + ' not found')
-    const title = patch.title !== undefined ? patch.title : r.latest.title
-    const content = patch.content_markdown !== undefined ? patch.content_markdown : r.latest.content_markdown
-    db.prepare('INSERT INTO revisions (resource_id, rev, title, content_markdown, created_by) VALUES (?, ?, ?, ?, ?)')
-      .run(r.row.id, r.latest.rev + 1, title, content, userId)
-    db.prepare("UPDATE resources SET updated_at = datetime('now') WHERE id = ?").run(r.row.id)
-    return viewByRowId(db, r.row.id)
+    const found = getResourceInternal(db, input.projectId, input.publicId)
+    if (!found) throw httpError(404, 'NOT_FOUND', 'resource ' + input.publicId + ' not found')
+    const hasContent = input.patch.title !== undefined || input.patch.content_markdown !== undefined
+    if (input.patch.status !== undefined && !canTransition(found.row.status as Status, input.patch.status as Status)) {
+      throw httpError(422, 'INVALID_TRANSITION', 'cannot transition ' + found.row.status + ' -> ' + input.patch.status)
+    }
+    if (hasContent) {
+      const newTitle = input.patch.title ?? found.latest.title
+      const newContent = input.patch.content_markdown ?? found.latest.content_markdown
+      db.prepare('INSERT INTO revisions (resource_id, rev, title, content_markdown, created_by) VALUES (?, ?, ?, ?, ?)')
+        .run(found.row.id, found.latest.rev + 1, newTitle, newContent, input.userId)
+    }
+    if (input.patch.status !== undefined) {
+      db.prepare('UPDATE resources SET status = ? WHERE id = ?').run(input.patch.status, found.row.id)
+    }
+    if (hasContent || input.patch.status !== undefined) {
+      db.prepare("UPDATE resources SET updated_at = datetime('now') WHERE id = ?").run(found.row.id)
+    }
+    return getResourceInternal(db, input.projectId, input.publicId)!.view
   })()
 }
 
