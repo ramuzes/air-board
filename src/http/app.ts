@@ -2,8 +2,11 @@
 import Fastify, { FastifyInstance } from 'fastify'
 import cookie from '@fastify/cookie'
 import type { Config } from '../config.js'
+import type { DB } from '../store/db.js'
+import { makeRequireAuth } from './auth.js'
+import { registerUserRoutes } from './routes/users.js'
 
-export interface BuildOpts { config: Config }
+export interface BuildOpts { config: Config; db: DB }
 
 export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   const app = Fastify({ logger: false })
@@ -22,6 +25,9 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
     if ((err as any).details !== undefined) envelope.error.details = (err as any).details
     reply.status(status).send(envelope)
   })
+  // inside buildApp, before route registrations:
+  app.decorate('requireAuth', makeRequireAuth(opts.db))
+  registerUserRoutes(app, opts.db)
   app.get('/api/health', async () => ({ status: 'ok' }))
   return app
 }
