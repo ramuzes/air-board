@@ -4,28 +4,29 @@
 
 **Goal:** Build the AirBoard v1 service — CRUD for ADR/PRD/SPEC/PLAN/ISSUE resources with monotonic IDs, revision history, token auth, GitLab webhook commit binding, agent instructions, and a light web UI.
 
-**Architecture:** Modular monolith per ADR 0001: pure `domain/` logic, transactional better-sqlite3 `store/`, Fastify `http/` API, server-rendered `web/` pages in the same process. One SQLite file is the system of record.
+**Architecture:** Modular monolith per ADR 0001: pure `domain/` logic, transactional `bun:sqlite` `store/`, Fastify `http/` API, server-rendered `web/` pages in the same process. One SQLite file is the system of record.
 
-**Tech Stack:** TypeScript (ESM, Node 20+), Fastify 4, better-sqlite3, @fastify/swagger, @fastify/cookie, vitest.
+**Tech Stack:** TypeScript (ESM), bun 1.3.x as runtime + package manager + test runner (ADR 0005), Fastify 4, bun:sqlite, @fastify/swagger, @fastify/cookie.
 
 ## Global Constraints
 
-- Node >= 20, TypeScript strict mode, ESM modules (`"type": "module"`).
-- Runtime deps allowed: `fastify`, `better-sqlite3`, `@fastify/swagger`, `@fastify/cookie`. Dev deps: `typescript`, `vitest`, `tsx`, `@types/node`, `@types/better-sqlite3`. Nothing else without demonstrated need.
+- bun >= 1.3 is the runtime, package manager, and test runner (ADR 0005). TypeScript strict mode, ESM (`"type": "module"`). No native-module dependencies (bun:sqlite is built in).
+- Runtime deps allowed: `fastify`, `@fastify/swagger`, `@fastify/cookie`. Dev deps: `typescript`, `bun-types`. Nothing else without demonstrated need.
+- Sandbox env for installs/tests (read-only home dirs): `export BUN_INSTALL=$PWD/.scratch/bun BUN_TMPDIR=$PWD/.scratch/tmp BUN_CACHE_DIR=$PWD/.scratch/buncache` and `mkdir -p` them before any `bun install`. `.scratch/` is git-ignored. Tests via `bun test` do not need these vars; typecheck via `bunx tsc --noEmit`.
 - All API routes mount under `/api`; web UI at `/`. Spec: `docs/specs/2026-09-08-airboard-foundation-design.md` — follow it verbatim where cited.
 - Error envelope everywhere in `/api`: `{ error: { code, message, details? } }`; 404 unknown IDs; 422 invalid transitions/schemas; 401 bad/missing token.
 - Token format `abt_` + 32 hex chars; store only SHA-256 hash; shown once.
 - Lifecycle: `draft | active | done | cancelled`; kinds: `ADR | PRD | SPEC | PLAN | ISSUE`.
 - Env: `GITLAB_WEBHOOK_SECRET` (checked against `X-Gitlab-Token`), `DB_PATH` (default `./airboard.db`), `PORT` (default 3000), `BASE_URL` (default `http://localhost:3000`).
 - Commit commands run from repo root. Conventional commit style (`feat:`, `test:`, `chore:`).
-- Test command: `npx vitest run`.
+- Test command: `bun test`. Type check: `bunx tsc --noEmit`.
 
 ---
 
 ### Task 1: Scaffold + app skeleton + healthcheck
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `vitest.config.ts`, `src/config.ts`, `src/http/app.ts`, `src/http/errors.ts`, `tests/api/health.test.ts`, `.gitignore`
+- Create: `package.json`, `tsconfig.json`, `src/config.ts`, `src/http/app.ts`, `src/http/errors.ts`, `tests/api/health.test.ts`, `.gitignore`
 
 **Interfaces:**
 - Consumes: nothing (first task).
@@ -35,31 +36,34 @@
 
 ```ts
 // tests/api/health.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterAll } from 'bun:test'
 import { buildApp } from '../../src/http/app.js'
 
-const OPTS = { config: { dbPath: ':memory:', port: 3000, baseUrl: 'http://x', gitlabWebhookSecret: 's' } }
+// Real ephemeral listener — fastify's inject() is incompatible with bun (ADR 0005);
+// fetch with redirect: 'manual' so 302s are inspectable (same pattern the shared helper uses)
+const app = await buildApp({ config: { dbPath: ':memory:', port: 3000, baseUrl: 'http://x', gitlabWebhookSecret: 's' } })
+await app.listen({ port: 0, host: '127.0.0.1' })
+const base = 'http://127.0.0.1:' + (app.server.address() as any).port
+afterAll(async () => { await app.close() })
 
 describe('GET /api/health', () => {
   it('returns ok', async () => {
-    const app = await buildApp(OPTS)
-    const res = await app.inject({ method: 'GET', url: '/api/health' })
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ status: 'ok' })
+    const res = await fetch(base + '/api/health')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ status: 'ok' })
   })
 
   it('uses the error envelope for unknown routes under /api', async () => {
-    const app = await buildApp(OPTS)
-    const res = await app.inject({ method: 'GET', url: '/api/nope' })
-    expect(res.statusCode).toBe(404)
-    expect(res.json()).toEqual({ error: { code: 'NOT_FOUND', message: 'Route GET:/api/nope not found' } })
+    const res = await fetch(base + '/api/nope')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: { code: 'NOT_FOUND', message: 'Route GET:/api/nope not found' } })
   })
 })
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/health.test.ts`
+Run: `bun test tests/api/health.test.ts`
 Expected: FAIL — cannot resolve `../../src/http/app.js`.
 
 - [ ] **Step 3: Write scaffold and implementation**
@@ -70,25 +74,21 @@ Expected: FAIL — cannot resolve `../../src/http/app.js`.
   "name": "airboard",
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": { "bun": ">=1.3" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit",
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@fastify/cookie": "^9.3.1",
     "@fastify/swagger": "^8.14.0",
-    "better-sqlite3": "^11.3.0",
     "fastify": "^4.28.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
-    "@types/node": "^20.14.0",
-    "tsx": "^4.16.0",
-    "typescript": "^5.5.4",
-    "vitest": "^2.0.5"
+    "bun-types": "^1.2.0",
+    "typescript": "^5.5.4"
   }
 }
 ```
@@ -97,18 +97,12 @@ Expected: FAIL — cannot resolve `../../src/http/app.js`.
 // tsconfig.json
 {
   "compilerOptions": {
-    "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
-    "strict": true, "outDir": "dist", "declaration": false, "skipLibCheck": true,
-    "types": ["node"]
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "bundler",
+    "strict": true, "noEmit": true, "skipLibCheck": true,
+    "types": ["bun-types"]
   },
   "include": ["src", "tests"]
 }
-```
-
-```ts
-// vitest.config.ts
-import { defineConfig } from 'vitest/config'
-export default defineConfig({ test: { include: ['tests/**/*.test.ts'] } })
 ```
 
 ```
@@ -172,11 +166,11 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
 }
 ```
 
-Note: `db` is optional in Task 1; Task 3+ makes it required. Then run `npm install`.
+Note: `db` is optional in Task 1; Task 3+ makes it required. Then install with bun (sandbox env from Global Constraints): `export BUN_INSTALL=$PWD/.scratch/bun BUN_TMPDIR=$PWD/.scratch/tmp BUN_CACHE_DIR=$PWD/.scratch/buncache && mkdir -p $BUN_INSTALL $BUN_TMPDIR $BUN_CACHE_DIR && bun install`. Keep the existing `.scratch/` line in `.gitignore`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/health.test.ts`
+Run: `bun test tests/api/health.test.ts`
 Expected: PASS (2 tests).
 
 - [ ] **Step 5: Commit**
@@ -200,7 +194,7 @@ git add -A && git commit -m "chore: scaffold AirBoard app skeleton with healthch
 
 ```ts
 // tests/domain/domain.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { canTransition } from '../../src/domain/lifecycle.js'
 import { formatId, parseId, KINDS } from '../../src/domain/ids.js'
 import { parseRefs } from '../../src/domain/refs.js'
@@ -248,7 +242,7 @@ describe('parseRefs', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/domain/domain.test.ts`
+Run: `bun test tests/domain/domain.test.ts`
 Expected: FAIL — modules not found.
 
 - [ ] **Step 3: Implement**
@@ -294,7 +288,7 @@ export function parseRefs(text: string): string[] {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/domain/domain.test.ts`
+Run: `bun test tests/domain/domain.test.ts`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -312,14 +306,14 @@ git add -A && git commit -m "feat: domain module - lifecycle, id parsing, commit
 - Test: `tests/store/users.test.ts`
 
 **Interfaces:**
-- Consumes: better-sqlite3, `httpError` from Task 1.
+- Consumes: bun's built-in `bun:sqlite`, `httpError` from Task 1.
 - Produces: `openDb(path: string): DB` (creates all tables idempotently — including resources/revisions/webhook_events/commit_bindings used by later tasks); `type DB = Database.Database`; `type UserRow = { id: number; username: string; display_name: string; created_at: string }`; `createUser(db, { username, displayName }): UserRow` (409 CONFLICT on duplicate); `getUser(db, id)`; `listUsers(db)`; `countUsers(db): number`; `createToken(db, userId, label): { token: string; id: number }`; `verifyToken(db, token): UserRow | null` (revoked → null); `revokeToken(db, tokenId): boolean`; `listTokens(db, userId)`; `hashToken(t): string` (sha256 hex); `newTokenString(): string`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // tests/store/users.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { openDb } from '../../src/store/db.js'
 import { createUser, verifyToken, createToken, revokeToken, listTokens } from '../../src/store/users.js'
 
@@ -351,15 +345,15 @@ describe('users & tokens store', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/store/users.test.ts`
+Run: `bun test tests/store/users.test.ts`
 Expected: FAIL — modules not found.
 
 - [ ] **Step 3: Implement**
 
 ```ts
 // src/store/db.ts
-import Database from 'better-sqlite3'
-export type DB = Database.Database
+import { Database } from 'bun:sqlite'
+export type DB = Database
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -430,8 +424,8 @@ END;
 `
 export function openDb(path: string): DB {
   const db = new Database(path)
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = ON')
+  db.exec("PRAGMA journal_mode = WAL")
+  db.exec("PRAGMA foreign_keys = ON")
   db.exec(SCHEMA)
   return db
 }
@@ -486,7 +480,7 @@ export function listTokens(db: DB, userId: number): Array<{ id: number; label: s
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/store/users.test.ts`
+Run: `bun test tests/store/users.test.ts`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -505,53 +499,72 @@ git add -A && git commit -m "feat: sqlite schema and users/tokens store"
 
 **Interfaces:**
 - Consumes: Tasks 1–3.
-- Produces: `requireAuth` factory usable as `app.requireAuth` (Fastify decoration; sets `req.user`); `bearerToken(req): string | null`; `webUser(db, req): UserRow | null` (cookie `ab_token` first, then bearer — used by Task 11); `bootstrapIfEmpty(db): { token: string } | null` in `src/bootstrap.ts`; test helper `setup(): Promise<{ app; db; auth }>` where `auth = { authorization: string }` and config has `GITLAB_WEBHOOK_SECRET: 's'` (webhook tests in Task 9 rely on this).
+- Produces: `requireAuth` factory usable as `app.requireAuth` (Fastify decoration; sets `req.user`); `bearerToken(req): string | null`; `webUser(db, req): UserRow | null` (cookie `ab_token` first, then bearer — used by Task 11); `bootstrapIfEmpty(db): { token: string } | null` in `src/bootstrap.ts`; test helper `setup(): Promise<{ app; db; auth; inject }>` where `auth = { authorization: string }`, `inject({ method, url, headers?, payload? })` returns `{ statusCode, headers, body, json() }` (fetch-backed, `redirect: 'manual'`), and config has `GITLAB_WEBHOOK_SECRET: 's'` (webhook tests in Task 9 rely on this). All later tasks call `inject(...)` from setup, never `app.inject` (incompatible with bun, ADR 0005).
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // tests/helpers.ts
+import { afterAll } from 'bun:test'
 import { buildApp } from '../src/http/app.js'
 import { openDb, type DB } from '../src/store/db.js'
 import { createUser, createToken } from '../src/store/users.js'
 import type { FastifyInstance } from 'fastify'
 import { loadConfig } from '../src/config.js'
 
-export async function setup(): Promise<{ app: FastifyInstance; db: DB; auth: { authorization: string } }> {
+// Real ephemeral listener + fetch adapter with fastify-inject's call signature (ADR 0005).
+// afterAll inside setup() registers per-call cleanup for whichever test file imports this.
+export async function setup(): Promise<{ app: FastifyInstance; db: DB; auth: { authorization: string }; inject: (opts: { method: string; url: string; headers?: any; payload?: any }) => Promise<{ statusCode: number; headers: any; body: string; json: () => any }> }> {
   const db = openDb(':memory:')
   const u = createUser(db, { username: 'tester', displayName: 'Tester' })
   const { token } = createToken(db, u.id, 'test')
   const app = await buildApp({ config: loadConfig({ GITLAB_WEBHOOK_SECRET: 's' }), db })
-  return { app, db, auth: { authorization: 'Bearer ' + token } }
+  await app.listen({ port: 0, host: '127.0.0.1' })
+  const base = 'http://127.0.0.1:' + (app.server.address() as any).port
+  afterAll(async () => { await app.close(); db.close() })
+  const inject = async (opts: { method: string; url: string; headers?: any; payload?: any }) => {
+    const res = await fetch(base + opts.url, {
+      method: opts.method,
+      headers: {
+        ...(opts.payload !== undefined ? { 'content-type': 'application/json' } : {}),
+        ...(opts.headers ?? {})
+      },
+      body: opts.payload !== undefined ? JSON.stringify(opts.payload) : undefined,
+      redirect: 'manual'
+    })
+    const body = await res.text()
+    return { statusCode: res.status, headers: res.headers, body, json: () => JSON.parse(body) }
+  }
+  return { app, db, auth: { authorization: 'Bearer ' + token }, inject }
 }
 ```
 
 ```ts
 // tests/api/users.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 describe('users & tokens api', () => {
   it('rejects anonymous calls with 401 envelope', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/api/users' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/api/users' })
     expect(res.statusCode).toBe(401)
     expect(res.json().error.code).toBe('UNAUTHORIZED')
   })
   it('creates a user, mints and revokes a token', async () => {
-    const { app, auth } = await setup()
-    const create = await app.inject({ method: 'POST', url: '/api/users', headers: auth, payload: { username: 'dave', display_name: 'Dave' } })
+    const { app, auth, inject } = await setup()
+    const create = await inject({ method: 'POST', url: '/api/users', headers: auth, payload: { username: 'dave', display_name: 'Dave' } })
     expect(create.statusCode).toBe(201)
     const userId = create.json().id
-    const mint = await app.inject({ method: 'POST', url: '/api/users/' + userId + '/tokens', headers: auth, payload: { label: 'agent' } })
+    const mint = await inject({ method: 'POST', url: '/api/users/' + userId + '/tokens', headers: auth, payload: { label: 'agent' } })
     expect(mint.statusCode).toBe(201)
     expect(mint.json().token).toMatch(/^abt_[0-9a-f]{32}$/)
     const tokenId = mint.json().id
-    const list = await app.inject({ method: 'GET', url: '/api/users', headers: auth })
+    const list = await inject({ method: 'GET', url: '/api/users', headers: auth })
     expect(list.json().some((u: any) => u.username === 'dave')).toBe(true)
-    const revoke = await app.inject({ method: 'DELETE', url: '/api/tokens/' + tokenId, headers: auth })
+    const revoke = await inject({ method: 'DELETE', url: '/api/tokens/' + tokenId, headers: auth })
     expect(revoke.statusCode).toBe(204)
-    const bad = await app.inject({ method: 'GET', url: '/api/users', headers: { authorization: 'Bearer ' + mint.json().token } })
+    const bad = await inject({ method: 'GET', url: '/api/users', headers: { authorization: 'Bearer ' + mint.json().token } })
     expect(bad.statusCode).toBe(401)
   })
 })
@@ -559,7 +572,7 @@ describe('users & tokens api', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/users.test.ts`
+Run: `bun test tests/api/users.test.ts`
 Expected: FAIL — routes not registered (404 envelope).
 
 - [ ] **Step 3: Implement**
@@ -664,7 +677,7 @@ export function bootstrapIfEmpty(db: DB): { token: string } | null {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/users.test.ts` then `npx vitest run`
+Run: `bun test tests/api/users.test.ts` then `bun test`
 Expected: PASS everywhere.
 
 - [ ] **Step 5: Commit**
@@ -688,24 +701,24 @@ git add -A && git commit -m "feat: bearer auth and users/tokens API with bootstr
 
 ```ts
 // tests/api/projects.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 describe('projects api', () => {
   it('creates, lists, gets, and sets gitlab repo', async () => {
-    const { app, auth } = await setup()
-    const bad = await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'x', name: 'X' } })
+    const { app, auth, inject } = await setup()
+    const bad = await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'x', name: 'X' } })
     expect(bad.statusCode).toBe(400)
-    const create = await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+    const create = await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
     expect(create.statusCode).toBe(201)
     expect(create.json().key).toBe('CORE')
-    const list = await app.inject({ method: 'GET', url: '/api/projects', headers: auth })
+    const list = await inject({ method: 'GET', url: '/api/projects', headers: auth })
     expect(list.json()).toHaveLength(1)
-    const get = await app.inject({ method: 'GET', url: '/api/projects/CORE', headers: auth })
+    const get = await inject({ method: 'GET', url: '/api/projects/CORE', headers: auth })
     expect(get.json().name).toBe('Core')
-    const patch = await app.inject({ method: 'PATCH', url: '/api/projects/CORE', headers: auth, payload: { gitlab_repo_url: 'https://gitlab.example.com/team/core.git' } })
+    const patch = await inject({ method: 'PATCH', url: '/api/projects/CORE', headers: auth, payload: { gitlab_repo_url: 'https://gitlab.example.com/team/core.git' } })
     expect(patch.json().gitlab_repo_url).toBe('https://gitlab.example.com/team/core.git')
-    const missing = await app.inject({ method: 'GET', url: '/api/projects/NOPE', headers: auth })
+    const missing = await inject({ method: 'GET', url: '/api/projects/NOPE', headers: auth })
     expect(missing.statusCode).toBe(404)
   })
 })
@@ -713,7 +726,7 @@ describe('projects api', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/projects.test.ts`
+Run: `bun test tests/api/projects.test.ts`
 Expected: FAIL — routes not registered.
 
 - [ ] **Step 3: Implement**
@@ -783,7 +796,7 @@ Register in `buildApp`: `registerProjectRoutes(app, opts.db)`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/projects.test.ts` then `npx vitest run`
+Run: `bun test tests/api/projects.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -808,19 +821,19 @@ git add -A && git commit -m "feat: projects store and API"
 
 ```ts
 // tests/api/resources.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 async function mkProject(app: any, auth: any, key = 'CORE') {
-  const r = await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key, name: key } })
+  const r = await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key, name: key } })
   return r.json()
 }
 
 describe('resources api', () => {
   it('creates a resource with allocated id and revision 1', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await mkProject(app, auth)
-    const res = await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth,
+    const res = await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth,
       payload: { kind: 'ADR', title: 'Use SQLite', markdown: 'Because simple.' } })
     expect(res.statusCode).toBe(201)
     const body = res.json()
@@ -830,59 +843,59 @@ describe('resources api', () => {
     expect(body.content_markdown).toBe('Because simple.')
   })
   it('allocates monotonic numbers per kind', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await mkProject(app, auth)
     for (let i = 1; i <= 3; i++) {
-      await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 't' + i, markdown: 'm' } })
+      await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 't' + i, markdown: 'm' } })
     }
-    const list = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?kind=ISSUE', headers: auth })
+    const list = await inject({ method: 'GET', url: '/api/projects/CORE/resources?kind=ISSUE', headers: auth })
     expect(list.json().map((r: any) => r.id)).toEqual(['ISSUE-1', 'ISSUE-2', 'ISSUE-3'])
   })
   it('gets a resource and its revisions; 404 for unknown id', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await mkProject(app, auth)
-    await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'SPEC', title: 'S', markdown: 'v1' } })
-    const got = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-1', headers: auth })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'SPEC', title: 'S', markdown: 'v1' } })
+    const got = await inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-1', headers: auth })
     expect(got.json().title).toBe('S')
-    const revs = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-1/revisions', headers: auth })
+    const revs = await inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-1/revisions', headers: auth })
     expect(revs.json()).toHaveLength(1)
-    const rev1 = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-1/revisions/1', headers: auth })
+    const rev1 = await inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-1/revisions/1', headers: auth })
     expect(rev1.json().content_markdown).toBe('v1')
-    const nf = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-99', headers: auth })
+    const nf = await inject({ method: 'GET', url: '/api/projects/CORE/resources/SPEC-99', headers: auth })
     expect(nf.statusCode).toBe(404)
   })
   it('rejects invalid kind with 400', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await mkProject(app, auth)
-    const res = await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'EPIC', title: 'x', markdown: 'm' } })
+    const res = await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'EPIC', title: 'x', markdown: 'm' } })
     expect(res.statusCode).toBe(400)
   })
   it('full-text search matches titles and content, and reindexes on revision', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await mkProject(app, auth)
-    await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'Search engine choice', markdown: 'We will use bleve for indexing.' } })
-    await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'Unrelated', markdown: 'nothing here' } })
-    const byTitle = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=search', headers: auth })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'Search engine choice', markdown: 'We will use bleve for indexing.' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'Unrelated', markdown: 'nothing here' } })
+    const byTitle = await inject({ method: 'GET', url: '/api/projects/CORE/resources?q=search', headers: auth })
     expect(byTitle.json().map((r: any) => r.id)).toEqual(['ADR-1'])
-    const byContent = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=bleve', headers: auth })
+    const byContent = await inject({ method: 'GET', url: '/api/projects/CORE/resources?q=bleve', headers: auth })
     expect(byContent.json().map((r: any) => r.id)).toEqual(['ADR-1'])
     // update content: old term disappears, new term appears (trigger reindexes latest revision only)
-    await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'switched to zinc instead' } })
-    const oldTerm = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=bleve', headers: auth })
+    await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'switched to zinc instead' } })
+    const oldTerm = await inject({ method: 'GET', url: '/api/projects/CORE/resources?q=bleve', headers: auth })
     expect(oldTerm.json()).toHaveLength(0)
-    const newTerm = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=zinc', headers: auth })
+    const newTerm = await inject({ method: 'GET', url: '/api/projects/CORE/resources?q=zinc', headers: auth })
     expect(newTerm.json().map((r: any) => r.id)).toEqual(['ADR-1'])
   })
   it('GET /api/search spans projects and tolerates bad fts syntax', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await mkProject(app, auth, 'ONE')
     await mkProject(app, auth, 'TWO')
-    await app.inject({ method: 'POST', url: '/api/projects/ONE/resources', headers: auth, payload: { kind: 'ADR', title: 'alpha design', markdown: 'm' } })
-    await app.inject({ method: 'POST', url: '/api/projects/TWO/resources', headers: auth, payload: { kind: 'ISSUE', title: 'beta bug', markdown: 'm' } })
-    const res = await app.inject({ method: 'GET', url: '/api/search?q=beta', headers: auth })
+    await inject({ method: 'POST', url: '/api/projects/ONE/resources', headers: auth, payload: { kind: 'ADR', title: 'alpha design', markdown: 'm' } })
+    await inject({ method: 'POST', url: '/api/projects/TWO/resources', headers: auth, payload: { kind: 'ISSUE', title: 'beta bug', markdown: 'm' } })
+    const res = await inject({ method: 'GET', url: '/api/search?q=beta', headers: auth })
     expect(res.json()).toHaveLength(1)
     expect(res.json()[0].project_key).toBe('TWO')
-    const junk = await app.inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('NEAR('), headers: auth })
+    const junk = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('NEAR('), headers: auth })
     expect(junk.statusCode).toBe(200)
   })
 })
@@ -890,7 +903,7 @@ describe('resources api', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/resources.test.ts`
+Run: `bun test tests/api/resources.test.ts`
 Expected: FAIL — routes missing.
 
 - [ ] **Step 3: Implement**
@@ -939,10 +952,10 @@ function viewByRowId(db: DB, rowId: number): ResourceView {
 }
 
 export function listResources(db: DB, f: { projectId: number; kind?: string; status?: string; q?: string }): ResourceView[] {
-  let sql = 'SELECT r.id AS rid FROM resources r WHERE r.project_id = @projectId'
-  const params: any = { projectId: f.projectId }
-  if (f.kind) { sql += ' AND r.kind = @kind'; params.kind = f.kind }
-  if (f.status) { sql += ' AND r.status = @status'; params.status = f.status }
+  let sql = 'SELECT r.id AS rid FROM resources r WHERE r.project_id = ?'
+  const params: any[] = [f.projectId]
+  if (f.kind) { sql += ' AND r.kind = ?'; params.push(f.kind) }
+  if (f.status) { sql += ' AND r.status = ?'; params.push(f.status) }
   else { sql += " AND r.status != 'cancelled'" }
   if (f.q) {
     const rids = searchFts(db, f.q)
@@ -950,7 +963,7 @@ export function listResources(db: DB, f: { projectId: number; kind?: string; sta
     sql += ' AND r.id IN (' + rids.map((n) => Number(n)).join(',') + ')'
   }
   sql += ' ORDER BY r.kind, r.number'
-  return (db.prepare(sql).all(params) as any[]).map((r) => viewByRowId(db, r.rid))
+  return (db.prepare(sql).all(...params) as any[]).map((r) => viewByRowId(db, r.rid))
 }
 
 export function listRevisions(db: DB, resourceId: number) {
@@ -1046,7 +1059,7 @@ Register in `buildApp`: `registerResourceRoutes(app, opts.db)`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/resources.test.ts` then `npx vitest run`
+Run: `bun test tests/api/resources.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1071,56 +1084,56 @@ git add -A && git commit -m "feat: resources - create with ID allocation, list, 
 
 ```ts
 // tests/api/patch.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 async function seed(app: any, auth: any) {
-  await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
-  await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'T', markdown: 'v1' } })
+  await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+  await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'T', markdown: 'v1' } })
 }
 
 describe('PATCH resource', () => {
   it('content change appends a revision', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'v2' } })
+    const res = await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'v2' } })
     expect(res.json().rev).toBe(2)
     expect(res.json().content_markdown).toBe('v2')
-    const revs = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/revisions', headers: auth })
+    const revs = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/revisions', headers: auth })
     expect(revs.json()).toHaveLength(2)
   })
   it('status transition works and does not bump revisions', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { status: 'active' } })
+    const res = await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { status: 'active' } })
     expect(res.json().status).toBe('active')
     expect(res.json().rev).toBe(1)
   })
   it('invalid transition is 422', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { status: 'done' } })
+    const res = await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { status: 'done' } })
     expect(res.statusCode).toBe(422)
     expect(res.json().error.code).toBe('INVALID_TRANSITION')
   })
   it('content + invalid status rolls back the revision', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'v2', status: 'done' } })
+    const res = await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'v2', status: 'done' } })
     expect(res.statusCode).toBe(422)
-    const after = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1', headers: auth })
+    const after = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1', headers: auth })
     expect(after.json().rev).toBe(1)
     expect(after.json().content_markdown).toBe('v1')
   })
   it('cancelled resources disappear from default list but are fetchable', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { status: 'cancelled' } })
-    const list = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources', headers: auth })
+    await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { status: 'cancelled' } })
+    const list = await inject({ method: 'GET', url: '/api/projects/CORE/resources', headers: auth })
     expect(list.json()).toHaveLength(0)
-    const got = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1', headers: auth })
+    const got = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1', headers: auth })
     expect(got.json().status).toBe('cancelled')
-    const cancelledList = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?status=cancelled', headers: auth })
+    const cancelledList = await inject({ method: 'GET', url: '/api/projects/CORE/resources?status=cancelled', headers: auth })
     expect(cancelledList.json()).toHaveLength(1)
   })
 })
@@ -1128,7 +1141,7 @@ describe('PATCH resource', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/patch.test.ts`
+Run: `bun test tests/api/patch.test.ts`
 Expected: FAIL — PATCH route missing (404).
 
 - [ ] **Step 3: Implement**
@@ -1182,7 +1195,7 @@ app.patch('/api/projects/:key/resources/:id', {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/patch.test.ts` then `npx vitest run`
+Run: `bun test tests/api/patch.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1207,33 +1220,33 @@ git add -A && git commit -m "feat: PATCH resource - revision append and lifecycl
 
 ```ts
 // tests/api/bindings.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 async function seed(app: any, auth: any) {
-  await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
-  await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'Bug', markdown: 'm' } })
+  await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+  await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'Bug', markdown: 'm' } })
 }
 
 describe('manual bindings', () => {
   it('adds, lists, and dedups a binding', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const add = await app.inject({ method: 'POST', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth,
+    const add = await inject({ method: 'POST', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth,
       payload: { repo_url: 'https://gitlab.example.com/team/core.git', sha: 'abc123def456' } })
     expect(add.statusCode).toBe(201)
-    const again = await app.inject({ method: 'POST', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth,
+    const again = await inject({ method: 'POST', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth,
       payload: { repo_url: 'https://gitlab.example.com/team/core.git', sha: 'abc123def456' } })
     expect(again.statusCode).toBe(200)
     expect(again.json().duplicate).toBe(true)
-    const list = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth })
+    const list = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth })
     expect(list.json()).toHaveLength(1)
     expect(list.json()[0].sha).toBe('abc123def456')
   })
   it('validates payload', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const bad = await app.inject({ method: 'POST', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth, payload: { repo_url: 'x' } })
+    const bad = await inject({ method: 'POST', url: '/api/projects/CORE/resources/ISSUE-1/bindings', headers: auth, payload: { repo_url: 'x' } })
     expect(bad.statusCode).toBe(400)
   })
 })
@@ -1241,7 +1254,7 @@ describe('manual bindings', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/bindings.test.ts`
+Run: `bun test tests/api/bindings.test.ts`
 Expected: FAIL — routes missing.
 
 - [ ] **Step 3: Implement**
@@ -1293,7 +1306,7 @@ app.get('/api/projects/:key/resources/:id/bindings', { preHandler: [app.requireA
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/bindings.test.ts` then `npx vitest run`
+Run: `bun test tests/api/bindings.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1317,7 +1330,7 @@ git add -A && git commit -m "feat: commit bindings store and manual API"
 
 ```ts
 // tests/api/gitlab.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 const PUSH = (msg: string, sha = 'deadbeef', uuid = 'evt-1') => ({
@@ -1328,48 +1341,48 @@ const PUSH = (msg: string, sha = 'deadbeef', uuid = 'evt-1') => ({
 })
 
 async function seed(app: any, auth: any) {
-  await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core', gitlab_repo_url: 'https://gitlab.example.com/team/core.git' } })
-  await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'A', markdown: 'm' } })
-  await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'I', markdown: 'm' } })
+  await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core', gitlab_repo_url: 'https://gitlab.example.com/team/core.git' } })
+  await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'A', markdown: 'm' } })
+  await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'I', markdown: 'm' } })
 }
 
 describe('gitlab webhook', () => {
   it('rejects missing or wrong secret', async () => {
-    const { app } = await setup()
-    const noTok = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', payload: PUSH('x') })
+    const { app, inject } = await setup()
+    const noTok = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', payload: PUSH('x') })
     expect(noTok.statusCode).toBe(401)
-    const badTok = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 'wrong' }, payload: PUSH('x') })
+    const badTok = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 'wrong' }, payload: PUSH('x') })
     expect(badTok.statusCode).toBe(401)
     expect(badTok.json().error.code).toBe('WEBHOOK_SECRET')
   })
   it('binds commits whose messages reference resource ids', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('implement ADR-1 and closes ISSUE-1') })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('implement ADR-1 and closes ISSUE-1') })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ bound: 2, duplicates: 0 })
-    const b1 = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/bindings', headers: auth })
+    const b1 = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/bindings', headers: auth })
     expect(b1.json()[0].sha).toBe('deadbeef')
     expect(b1.json()[0].commit_url).toBe('https://gitlab.example.com/team/core/-/commit/deadbeef')
   })
   it('is idempotent on repeated event_uuid', async () => {
-    const { app } = await setup()
+    const { app, inject } = await setup()
     await seed(app, auth)
     const h = { 'x-gitlab-token': 's' }
-    await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
-    const dup = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    const dup = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
     expect(dup.json()).toEqual({ bound: 0, duplicates: 1 })
   })
   it('same commit binding another resource is not a duplicate; unbound refs are ignored', async () => {
-    const { app } = await setup()
+    const { app, inject } = await setup()
     await seed(app, auth)
-    const res = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('ADR-1 ISSUE-1 ADR-99') })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('ADR-1 ISSUE-1 ADR-99') })
     expect(res.json()).toEqual({ bound: 2, duplicates: 0 })
   })
   it('ignores repos not bound to any project', async () => {
-    const { app } = await setup()
+    const { app, inject } = await setup()
     const p = { ...PUSH('refs ADR-1'), project: { git_http_url: 'https://gitlab.example.com/other/x.git' } }
-    const res = await app.inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: p })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: p })
     expect(res.statusCode).toBe(200)
     expect(res.json().bound).toBe(0)
   })
@@ -1378,20 +1391,20 @@ describe('gitlab webhook', () => {
 
 ```ts
 // tests/api/plugins.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 import { createGitlabPlugin } from '../../src/plugins/gitlab.js'
 
 describe('connector registry', () => {
   it('lists the gitlab connector with its webhook url', async () => {
-    const { app, auth } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/api/plugins', headers: auth })
+    const { app, auth, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/api/plugins', headers: auth })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual([{ id: 'gitlab', display_name: 'GitLab', webhook_url: '/api/plugins/gitlab/webhook' }])
   })
   it('requires auth', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/api/plugins' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/api/plugins' })
     expect(res.statusCode).toBe(401)
   })
   it('derives commit urls, stripping .git', () => {
@@ -1403,7 +1416,7 @@ describe('connector registry', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/gitlab.test.ts tests/api/plugins.test.ts`
+Run: `bun test tests/api/gitlab.test.ts tests/api/plugins.test.ts`
 Expected: FAIL — routes missing.
 
 - [ ] **Step 3: Implement**
@@ -1530,7 +1543,7 @@ return listBindings(db, r.row.id).map((b) => ({ ...b, commit_url: commitUrlFor(b
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/gitlab.test.ts tests/api/plugins.test.ts` then `npx vitest run`
+Run: `bun test tests/api/gitlab.test.ts tests/api/plugins.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1555,13 +1568,13 @@ git add -A && git commit -m "feat: gitlab push webhook with dedup and commit bin
 
 ```ts
 // tests/api/agents.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 describe('agent instructions', () => {
   it('serves JSON instructions without auth', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/api/agents/instructions' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/api/agents/instructions' })
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.auth.scheme).toBe('bearer')
@@ -1569,16 +1582,16 @@ describe('agent instructions', () => {
     expect(body.openapi_url).toBe('/openapi.json')
   })
   it('serves AGENTS.md as markdown', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/AGENTS.md' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/AGENTS.md' })
     expect(res.statusCode).toBe(200)
-    expect(res.headers['content-type']).toContain('text/markdown')
+    expect(res.headers.get('content-type')).toContain('text/markdown')
     expect(res.body).toContain('# AirBoard Agent Guide')
     expect(res.body).toContain('Bearer abt_')
   })
   it('serves openapi.json', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/openapi.json' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/openapi.json' })
     expect(res.statusCode).toBe(200)
     expect(res.json().openapi).toMatch(/^3\./)
     expect(res.json().paths['/api/projects/{key}/resources']).toBeTruthy()
@@ -1588,7 +1601,7 @@ describe('agent instructions', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/agents.test.ts`
+Run: `bun test tests/api/agents.test.ts`
 Expected: FAIL — routes missing.
 
 - [ ] **Step 3: Implement**
@@ -1683,7 +1696,7 @@ Register in `buildApp`: `registerAgentRoutes(app, opts.config)`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/agents.test.ts` then `npx vitest run`
+Run: `bun test tests/api/agents.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1708,58 +1721,57 @@ git add -A && git commit -m "feat: agent instructions endpoint, AGENTS.md, and O
 
 ```ts
 // tests/api/web.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
 function withCookie(res: any): string {
-  const set = res.headers['set-cookie'] as string[] | string
-  return (Array.isArray(set) ? set[0] : set).split(';')[0]
+  return (res.headers as any).getSetCookie()[0].split(';')[0]
 }
 
 describe('web ui', () => {
   it('login page renders anonymously', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/login' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/login' })
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('<form')
   })
   it('login with token sets cookie and shows project list', async () => {
-    const { app, auth } = await setup()
+    const { app, auth, inject } = await setup()
     const tok = (auth.authorization.match(/Bearer (.+)/) as any)[1]
-    const login = await app.inject({ method: 'POST', url: '/login', payload: { token: tok } })
+    const login = await inject({ method: 'POST', url: '/login', payload: { token: tok } })
     expect(login.statusCode).toBe(302)
     const cookie = withCookie(login)
-    const home = await app.inject({ method: 'GET', url: '/', headers: { cookie } })
+    const home = await inject({ method: 'GET', url: '/', headers: { cookie } })
     expect(home.statusCode).toBe(200)
     expect(home.body).toContain('Projects')
   })
   it('resource detail renders markdown, escapes html, transitions', async () => {
-    const { app, auth } = await setup()
-    await app.inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
-    await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'T <b>x</b>', markdown: 'hello\n\nworld' } })
+    const { app, auth, inject } = await setup()
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'T <b>x</b>', markdown: 'hello\n\nworld' } })
     const tok = (auth.authorization.match(/Bearer (.+)/) as any)[1]
     const cookie = 'ab_token=' + tok
-    const page = await app.inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
+    const page = await inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
     expect(page.statusCode).toBe(200)
     expect(page.body).toContain('&lt;b&gt;x&lt;/b&gt;')
     expect(page.body).toContain('<p>hello</p>')
-    const st = await app.inject({ method: 'POST', url: '/p/CORE/ADR-1/status', headers: { cookie }, payload: { status: 'active' } })
+    const st = await inject({ method: 'POST', url: '/p/CORE/ADR-1/status', headers: { cookie }, payload: { status: 'active' } })
     expect(st.statusCode).toBe(302)
-    const after = await app.inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
+    const after = await inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
     expect(after.body).toContain('active')
   })
   it('rejects unauthenticated browsing with redirect to /login', async () => {
-    const { app } = await setup()
-    const res = await app.inject({ method: 'GET', url: '/' })
+    const { app, inject } = await setup()
+    const res = await inject({ method: 'GET', url: '/' })
     expect(res.statusCode).toBe(302)
-    expect(res.headers.location).toBe('/login')
+    expect(res.headers.get('location')).toBe('/login')
   })
 })
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/api/web.test.ts`
+Run: `bun test tests/api/web.test.ts`
 Expected: FAIL — routes missing.
 
 - [ ] **Step 3: Implement**
@@ -1893,7 +1905,7 @@ Register in `buildApp`: `registerWebRoutes(app, opts.db)` (`@fastify/cookie` was
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/api/web.test.ts` then `npx vitest run`
+Run: `bun test tests/api/web.test.ts` then `bun test`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1918,7 +1930,7 @@ git add -A && git commit -m "feat: server-rendered web UI - login, browse, edit,
 
 ```ts
 // tests/bootstrap.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect } from 'bun:test'
 import { openDb } from '../src/store/db.js'
 import { bootstrapIfEmpty } from '../src/bootstrap.js'
 import { verifyToken } from '../src/store/users.js'
@@ -1936,7 +1948,7 @@ describe('bootstrapIfEmpty', () => {
 
 - [ ] **Step 2: Run test to verify it fails or passes**
 
-Run: `npx vitest run tests/bootstrap.test.ts`
+Run: `bun test tests/bootstrap.test.ts`
 Expected: likely PASS already (`src/bootstrap.ts` exists from Task 4) — the test locks the once-only contract; keep it and proceed.
 
 - [ ] **Step 3: Implement**
@@ -1971,7 +1983,7 @@ Self-hosted, agent-friendly project tracking for ADRs, PRDs, Specs, Plans, and I
 
 ## Run
 
-    npm install && npm run build && npm start     # or: npm run dev
+    bun install && bun start     # or: bun run dev
 
 Env vars: PORT (3000), DB_PATH (./airboard.db), BASE_URL, GITLAB_WEBHOOK_SECRET.
 
@@ -1992,7 +2004,7 @@ In your GitLab project: Settings -> Webhooks -> add <BASE_URL>/api/plugins/gitla
 
 - [ ] **Step 4: Run full verification**
 
-Run: `npx vitest run` and `npm run build`; then smoke-test: `PORT=3100 DB_PATH=/tmp/ab-smoke.db npm run dev &` wait 2s, `curl -s localhost:3100/api/health` expect `{"status":"ok"}`, bootstrap token printed, then kill.
+Run: `bun test` and `bunx tsc --noEmit`; then smoke-test: `PORT=3100 DB_PATH=/tmp/ab-smoke.db bun src/index.ts &` wait 2s, `curl -s localhost:3100/api/health` expect `{"status":"ok"}`, bootstrap token printed, then kill.
 Expected: all tests PASS, build clean, health ok.
 
 - [ ] **Step 5: Commit**

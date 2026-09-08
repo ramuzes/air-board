@@ -49,7 +49,7 @@ A single Node.js service exposing: a REST API under `/api` (bearer-token auth), 
 **Module layout** (per ADR 0001):
 
 - `domain` — pure, I/O-free logic: lifecycle transitions, ID format, revision numbering, commit-message reference parsing. Fully unit-testable.
-- `store` — better-sqlite3. Synchronous, transactional. Owns the schema and all SQL. Allocation of the next Resource number happens inside the creation transaction (per ADR 0002).
+- `store` — SQLite via bun's built-in `bun:sqlite` (ADR 0005). Synchronous, transactional. Owns the schema and all SQL. Allocation of the next Resource number happens inside the creation transaction (per ADR 0002).
 - `http` — Fastify. JSON Schema-validated routes, OpenAPI document generated from route schemas.
 - `web` — server-rendered pages (Fastify view templates) served by the same process; session-cookie auth reusing Access Token verification.
 
@@ -95,9 +95,9 @@ A single Node.js service exposing: a REST API under `/api` (bearer-token auth), 
 
 ### Testing decisions
 
-- **Seam:** the HTTP API via Fastify's `inject()` — one integration test seam covering http + domain + store against a temporary SQLite file. This is the highest-value seam since the API is the product.
+- **Seam:** the HTTP API over a real ephemeral listener (`listen({ port: 0 })` + `fetch`, per ADR 0005) — one integration test seam covering http + domain + store against an in-memory SQLite database. This is the highest-value seam since the API is the product. Test framework: bun:test; type checking: `tsc --noEmit`.
 - Domain unit tests (no I/O) for: lifecycle transition table, commit-message ref parsing, ID formatting.
-- Store-level tests for the ID-allocation transaction under simulated concurrency (sequential interleaved transactions, since better-sqlite3 is single-writer) and revision append-only invariants.
+- Store-level tests for the ID-allocation transaction under simulated concurrency (sequential interleaved transactions, since SQLite is single-writer) and revision append-only invariants.
 - No prior art (greenfield); these tests become the pattern for future work.
 
 ## Further notes
