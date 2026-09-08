@@ -34,7 +34,7 @@ A self-hosted AirBoard service (single team, <20 Users) that:
 - Multi-team / multi-tenant permissions, roles, orgs.
 - Per-kind state machines beyond the shared Lifecycle (e.g. ISSUE workflow columns).
 - Bidirectional write-back to GitLab (comments, MRs) — inbound binding only.
-- Full-text search beyond SQL LIKE initially; richer search later.
+- Relevance tuning / ranking controls beyond FTS5 defaults.
 - Email/notifications of any kind.
 - Kanban / drag-drop UI.
 
@@ -62,6 +62,7 @@ A single Node.js service exposing: a REST API under `/api` (bearer-token auth), 
 - `revisions` (id, resource_id, rev, content_markdown, created_by, created_at) — unique (resource_id, rev), append-only per ADR 0003. Title changes also produce a revision.
 - `commit_bindings` (id, project_id, resource_id, repo_url, sha, commit_message_ref, pushed_at, raw_payload_id nullable) — unique (resource_id, repo_url, sha).
 - `webhook_events` (id, source, dedup_key, received_at, payload) — inbound webhook journal for dedup (GitLab event UUID) and replay/debugging.
+- `resource_fts` — FTS5 virtual table over (resource_row_id, title, content); maintained by an AFTER INSERT trigger on `revisions` that replaces the resource's single row, so the index always reflects the latest revision.
 
 **Lifecycle:** shared state machine `draft → active → done`, `draft|active → cancelled`. Transitions validated in `domain`; invalid transitions get 422. Cancellation is soft: the Resource stays queryable, filtered out of default lists.
 
@@ -75,7 +76,8 @@ A single Node.js service exposing: a REST API under `/api` (bearer-token auth), 
 - `POST /users/:id/tokens` → returns plaintext token once; `DELETE /tokens/:id` revokes
 - `POST /projects`, `GET /projects`, `GET /projects/:key`
 - `POST /projects/:key/resources` (kind, title, markdown) → 201 with allocated ID
-- `GET /projects/:key/resources?kind=&status=&q=` (q = LIKE over title/content)
+- `GET /projects/:key/resources?kind=&status=&q=` — `q` runs a full-text search over title + latest content via SQLite FTS5 (one row per resource, reindexed on every revision append), falling back to LIKE matching when the FTS5 query syntax is invalid
+- `GET /search?q=` — the same full-text search across all projects, returning hits with `project_key` so agents can jump straight to the right resource
 - `GET|PATCH /resources/:id` — `:id` is the **public** `ADR-42`-style ID (with optional project scoping `/projects/:key/resources/:id`). PATCH: title/content changes append a revision; status triggers a lifecycle transition. A PATCH carrying both content and status applies both in one transaction (revision appended and transition validated together; if the transition is invalid the whole request is 422 and no revision is written).
 - `GET /resources/:id/revisions`, `GET /resources/:id/revisions/:rev`
 - `POST /resources/:id/bindings` (manual commit binding: repo_url, sha) and `GET /resources/:id/bindings`

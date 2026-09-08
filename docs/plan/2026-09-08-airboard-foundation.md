@@ -422,6 +422,11 @@ CREATE TABLE IF NOT EXISTS commit_bindings (
   webhook_event_id INTEGER REFERENCES webhook_events(id),
   UNIQUE (resource_id, repo_url, sha)
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS resource_fts USING fts5(title, content, resource_row_id UNINDEXED);
+CREATE TRIGGER IF NOT EXISTS revisions_fts_ins AFTER INSERT ON revisions BEGIN
+  DELETE FROM resource_fts WHERE resource_row_id = NEW.resource_id;
+  INSERT INTO resource_fts(resource_row_id, title, content) VALUES (NEW.resource_id, NEW.title, NEW.content_markdown);
+END;
 `
 export function openDb(path: string): DB {
   const db = new Database(path)
@@ -797,7 +802,7 @@ git add -A && git commit -m "feat: projects store and API"
 
 **Interfaces:**
 - Consumes: Tasks 2–5.
-- Produces: `type ResourceView = { id: string; kind: string; number: number; project_key: string; title: string; status: string; content_markdown: string; rev: number; created_by: number; created_at: string; updated_at: string }`; `createResource(db, { projectId, kind, title, contentMarkdown, userId }): ResourceView` (allocation in one transaction); `listResources(db, { projectId, kind?, status?, q? }): ResourceView[]` (no status → excludes cancelled; `q` = LIKE over title+latest content); `getResourceInternal(db, projectId, publicId): { row: any; latest: any; view: ResourceView } | null` (used by Tasks 7–9); `listRevisions(db, resourceRowId)`; `getRevision(db, resourceRowId, rev)`.
+- Produces: `type ResourceView = { id: string; kind: string; number: number; project_key: string; title: string; status: string; content_markdown: string; rev: number; created_by: number; created_at: string; updated_at: string }`; `createResource(db, { projectId, kind, title, contentMarkdown, userId }): ResourceView` (allocation in one transaction); `listResources(db, { projectId, kind?, status?, q? }): ResourceView[]` (no status → excludes cancelled; `q` = FTS5 full-text over title+latest content, LIKE fallback); `searchFts(db, q): number[]` (row ids of matching resources; FTS5 MATCH with LIKE fallback on syntax error); `searchAll(db, q): ResourceView[]` (FTS across all projects); `getResourceInternal(db, projectId, publicId): { row: any; latest: any; view: ResourceView } | null` (used by Tasks 7–9); `listRevisions(db, resourceRowId)`; `getRevision(db, resourceRowId, rev)`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -851,6 +856,34 @@ describe('resources api', () => {
     await mkProject(app, auth)
     const res = await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'EPIC', title: 'x', markdown: 'm' } })
     expect(res.statusCode).toBe(400)
+  })
+  it('full-text search matches titles and content, and reindexes on revision', async () => {
+    const { app, auth } = await setup()
+    await mkProject(app, auth)
+    await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'Search engine choice', markdown: 'We will use bleve for indexing.' } })
+    await app.inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'Unrelated', markdown: 'nothing here' } })
+    const byTitle = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=search', headers: auth })
+    expect(byTitle.json().map((r: any) => r.id)).toEqual(['ADR-1'])
+    const byContent = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=bleve', headers: auth })
+    expect(byContent.json().map((r: any) => r.id)).toEqual(['ADR-1'])
+    // update content: old term disappears, new term appears (trigger reindexes latest revision only)
+    await app.inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'switched to zinc instead' } })
+    const oldTerm = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=bleve', headers: auth })
+    expect(oldTerm.json()).toHaveLength(0)
+    const newTerm = await app.inject({ method: 'GET', url: '/api/projects/CORE/resources?q=zinc', headers: auth })
+    expect(newTerm.json().map((r: any) => r.id)).toEqual(['ADR-1'])
+  })
+  it('GET /api/search spans projects and tolerates bad fts syntax', async () => {
+    const { app, auth } = await setup()
+    await mkProject(app, auth, 'ONE')
+    await mkProject(app, auth, 'TWO')
+    await app.inject({ method: 'POST', url: '/api/projects/ONE/resources', headers: auth, payload: { kind: 'ADR', title: 'alpha design', markdown: 'm' } })
+    await app.inject({ method: 'POST', url: '/api/projects/TWO/resources', headers: auth, payload: { kind: 'ISSUE', title: 'beta bug', markdown: 'm' } })
+    const res = await app.inject({ method: 'GET', url: '/api/search?q=beta', headers: auth })
+    expect(res.json()).toHaveLength(1)
+    expect(res.json()[0].project_key).toBe('TWO')
+    const junk = await app.inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('NEAR('), headers: auth })
+    expect(junk.statusCode).toBe(200)
   })
 })
 ```
@@ -912,8 +945,9 @@ export function listResources(db: DB, f: { projectId: number; kind?: string; sta
   if (f.status) { sql += ' AND r.status = @status'; params.status = f.status }
   else { sql += " AND r.status != 'cancelled'" }
   if (f.q) {
-    sql += ' AND EXISTS (SELECT 1 FROM revisions v WHERE v.resource_id = r.id AND v.rev = (SELECT MAX(rev) FROM revisions WHERE resource_id = r.id) AND (v.title LIKE @q OR v.content_markdown LIKE @q))'
-    params.q = '%' + f.q + '%'
+    const rids = searchFts(db, f.q)
+    if (rids.length === 0) return []
+    sql += ' AND r.id IN (' + rids.map((n) => Number(n)).join(',') + ')'
   }
   sql += ' ORDER BY r.kind, r.number'
   return (db.prepare(sql).all(params) as any[]).map((r) => viewByRowId(db, r.rid))
@@ -925,6 +959,18 @@ export function listRevisions(db: DB, resourceId: number) {
 export function getRevision(db: DB, resourceId: number, rev: number) {
   return (db.prepare('SELECT rev, title, content_markdown, created_by, created_at FROM revisions WHERE resource_id = ? AND rev = ?').get(resourceId, rev) as any) ?? null
 }
+
+export function searchFts(db: DB, q: string): number[] {
+  try {
+    return (db.prepare('SELECT resource_row_id AS rid FROM resource_fts WHERE resource_fts MATCH ?').all(q) as any[]).map((r) => r.rid)
+  } catch {
+    // invalid FTS5 query syntax (unbalanced quotes, bare operators) -> substring fallback
+    return (db.prepare('SELECT resource_row_id AS rid FROM resource_fts WHERE title LIKE ? OR content LIKE ?').all('%' + q + '%', '%' + q + '%') as any[]).map((r) => r.rid)
+  }
+}
+export function searchAll(db: DB, q: string): ResourceView[] {
+  return searchFts(db, q).map((rid) => viewByRowId(db, rid))
+}
 ```
 
 ```ts
@@ -932,7 +978,7 @@ export function getRevision(db: DB, resourceId: number, rev: number) {
 import type { FastifyInstance } from 'fastify'
 import type { DB } from '../../store/db.js'
 import { getProjectByKey } from '../../store/projects.js'
-import { createResource, listResources, getResourceInternal, listRevisions, getRevision } from '../../store/resources.js'
+import { createResource, listResources, getResourceInternal, listRevisions, getRevision, searchAll } from '../../store/resources.js'
 import { httpError } from '../errors.js'
 
 export function projectOr404(db: DB, key: string) {
@@ -960,6 +1006,12 @@ export function registerResourceRoutes(app: FastifyInstance, db: DB) {
     const p = projectOr404(db, key)
     const q = req.query as any
     return listResources(db, { projectId: p.id, kind: q.kind, status: q.status, q: q.q })
+  })
+
+  app.get('/api/search', { preHandler: [app.requireAuth] }, async (req) => {
+    const q = (req.query as any).q
+    if (!q) return []
+    return searchAll(db, String(q))
   })
 
   app.get('/api/projects/:key/resources/:id', { preHandler: [app.requireAuth] }, async (req) => {
@@ -1483,11 +1535,12 @@ export function agentInstructions(baseUrl: string) {
       create: 'POST /api/projects/{key}/resources  body: { kind, title, markdown } -> returns resource in draft with its id',
       read: 'GET /api/projects/{key}/resources/{id} (latest) or /revisions/{rev} (any revision)',
       update: 'PATCH /api/projects/{key}/resources/{id} body: { title?, content_markdown?, status? } - content change appends a revision',
-      commit_refs: 'write KIND-number tokens in git commit messages; pushes via GitLab webhook bind commits automatically'
+      commit_refs: 'write KIND-number tokens in git commit messages; pushes via GitLab webhook bind commits automatically',
+      search: 'GET /api/search?q=<terms> for full-text search across all projects (FTS5 over title+content); or ?q= on the project resource list'
     },
     endpoints: {
       health: '/api/health', users: '/api/users', tokens: '/api/users/{id}/tokens',
-      projects: '/api/projects', resources: '/api/projects/{key}/resources',
+      projects: '/api/projects', resources: '/api/projects/{key}/resources', search: '/api/search?q=',
       revisions: '/api/projects/{key}/resources/{id}/revisions',
       bindings: '/api/projects/{key}/resources/{id}/bindings',
       webhook: '/api/webhooks/gitlab', openapi: '/openapi.json', agents_md: '/AGENTS.md'
@@ -1515,6 +1568,7 @@ export function agentsMd(): string {
     '- Update: \`PATCH /api/projects/{key}/resources/{id}\` — content/title changes append a revision; \`status\` transitions lifecycle (draft->active->done, or ->cancelled).',
     '- Cancel unneeded work: \`PATCH\` with \`{ "status": "cancelled" }\`. Cancelled resources are kept for history.',
     '- Commits: reference ids in commit messages (\`fix ADR-42\`); the GitLab webhook records the binding automatically.',
+    '- Search: \`GET /api/search?q=terms\` full-text search across all projects (FTS5 over titles and latest content).',
     '',
     '## Rules',
     '- IDs are allocated by the server only; never invent one.',
