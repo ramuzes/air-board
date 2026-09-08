@@ -4,10 +4,11 @@
 
 ```bash
 bun install
-PORT=3010 DB_PATH=./airboard.db BASE_URL=http://localhost:3010 bun src/index.ts
+cp .env.example .env   # edit to taste — bun loads .env automatically
+bun src/index.ts
 ```
 
-Env vars (all optional):
+All settings are optional and can also be passed as plain environment variables (env vars and `.env` behave the same; bun auto-loads `.env` from the working directory):
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -15,6 +16,8 @@ Env vars (all optional):
 | `DB_PATH` | ./airboard.db | SQLite database file (created if missing) |
 | `BASE_URL` | http://localhost:3000 | advertised in agent instructions |
 | `GITLAB_WEBHOOK_SECRET` | (unset) | shared secret for the GitLab webhook — until set, the webhook answers 503 NOT_CONFIGURED |
+
+`.env` is git-ignored (it holds secrets); `.env.example` documents every variable.
 
 ## 2. Grab the one-time bootstrap token
 

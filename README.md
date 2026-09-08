@@ -5,9 +5,11 @@ Self-hosted, agent-friendly project tracking for ADRs, PRDs, Specs, Plans, and I
 
 ## Run
 
-    bun install && bun start     # or: bun run dev
+    bun install
+    cp .env.example .env    # optional — edit settings; bun loads .env automatically
+    bun start               # or: bun run dev
 
-Env vars: PORT (3000), DB_PATH (./airboard.db), BASE_URL, GITLAB_WEBHOOK_SECRET.
+Config via .env or env vars: PORT (3000), DB_PATH (./airboard.db), BASE_URL, GITLAB_WEBHOOK_SECRET. See QUICKSTART.md for the full walkthrough.
 
 ## First run
 

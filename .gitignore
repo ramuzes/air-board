@@ -3,3 +3,6 @@ dist/
 airboard.db
 *.db
 .scratch/
+.env
+.env.*
+!.env.example
