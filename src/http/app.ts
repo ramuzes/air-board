@@ -9,6 +9,7 @@ import { registerUserRoutes } from './routes/users.js'
 import { registerProjectRoutes } from './routes/projects.js'
 import { registerResourceRoutes } from './routes/resources.js'
 import { registerAgentRoutes } from './routes/agents.js'
+import { registerWebRoutes } from './routes/web.js'
 import { createGitlabPlugin } from '../plugins/gitlab.js'
 import { registerConnector, listConnectors } from '../plugins/registry.js'
 
@@ -40,6 +41,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   registerResourceRoutes(app, opts.db)
   registerConnector(app, opts.db, createGitlabPlugin(opts.config))
   registerAgentRoutes(app, opts.config)
+  registerWebRoutes(app, opts.db)
   app.get('/api/plugins', { preHandler: [app.requireAuth] }, async () =>
     listConnectors().map((c) => ({ id: c.id, display_name: c.displayName, webhook_url: c.webhookPath })))
   app.get('/api/health', async () => ({ status: 'ok' }))
