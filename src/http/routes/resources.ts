@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import type { DB } from '../../store/db.js'
 import { getProjectByKey } from '../../store/projects.js'
 import { createResource, listResources, getResourceInternal, listRevisions, getRevision, searchAll, updateResource } from '../../store/resources.js'
+import { addBinding, listBindings } from '../../store/bindings.js'
 import { httpError } from '../errors.js'
 
 export function projectOr404(db: DB, key: string) {
@@ -63,6 +64,28 @@ export function registerResourceRoutes(app: FastifyInstance, db: DB) {
     const r = getResourceInternal(db, p.id, id)
     if (!r) throw httpError(404, 'NOT_FOUND', 'resource ' + id + ' not found')
     return listRevisions(db, r.row.id)
+  })
+
+  app.post('/api/projects/:key/resources/:id/bindings', {
+    preHandler: [app.requireAuth],
+    schema: { body: { type: 'object', required: ['repo_url', 'sha'], properties: { repo_url: { type: 'string' }, sha: { type: 'string', minLength: 6 } } } }
+  }, async (req, reply) => {
+    const { key, id } = req.params as any
+    const p = projectOr404(db, key)
+    const r = getResourceInternal(db, p.id, id)
+    if (!r) throw httpError(404, 'NOT_FOUND', 'resource ' + id + ' not found')
+    const b = req.body as any
+    const result = addBinding(db, { projectId: p.id, resourceRowId: r.row.id, repoUrl: b.repo_url, sha: b.sha, ref: id, pushedAt: null })
+    reply.code(result.duplicate ? 200 : 201)
+    return result
+  })
+
+  app.get('/api/projects/:key/resources/:id/bindings', { preHandler: [app.requireAuth] }, async (req) => {
+    const { key, id } = req.params as any
+    const p = projectOr404(db, key)
+    const r = getResourceInternal(db, p.id, id)
+    if (!r) throw httpError(404, 'NOT_FOUND', 'resource ' + id + ' not found')
+    return listBindings(db, r.row.id)
   })
 
   app.get('/api/projects/:key/resources/:id/revisions/:rev', { preHandler: [app.requireAuth] }, async (req) => {
