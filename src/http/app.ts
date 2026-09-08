@@ -5,6 +5,7 @@ import type { Config } from '../config.js'
 import type { DB } from '../store/db.js'
 import { makeRequireAuth } from './auth.js'
 import { registerUserRoutes } from './routes/users.js'
+import { registerProjectRoutes } from './routes/projects.js'
 
 export interface BuildOpts { config: Config; db: DB }
 
@@ -28,6 +29,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   // inside buildApp, before route registrations:
   app.decorate('requireAuth', makeRequireAuth(opts.db))
   registerUserRoutes(app, opts.db)
+  registerProjectRoutes(app, opts.db)
   app.get('/api/health', async () => ({ status: 'ok' }))
   return app
 }
