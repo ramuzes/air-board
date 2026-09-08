@@ -7,6 +7,6 @@ export interface ConnectorPlugin {
   displayName: string
   webhookPath?: string                                  // mounted as POST <webhookPath>
   verifyWebhook(req: FastifyRequest): void              // throw httpError(...) to reject
-  handleWebhook(db: DB, payload: unknown): unknown      // returns the 200 response body
+  handleWebhook(db: DB, payload: unknown, headers: FastifyRequest['headers']): unknown  // returns the 200 response body
   commitUrl?(repoUrl: string, sha: string): string      // external deep-link derivation
 }

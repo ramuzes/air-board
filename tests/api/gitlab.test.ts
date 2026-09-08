@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'bun:test'
 import { setup } from '../helpers.js'
 
-const PUSH = (msg: string, sha = 'deadbeef', uuid = 'evt-1') => ({
+// Real GitLab sends the event UUID only via the X-Gitlab-Event-UUID header.
+const PUSH = (msg: string, sha = 'deadbeef') => ({
   object_kind: 'push',
-  event_uuid: uuid,
   project: { git_http_url: 'https://gitlab.example.com/team/core.git', web_url: 'https://gitlab.example.com/team/core' },
   commits: [{ id: sha, message: msg, timestamp: '2026-09-08T10:00:00Z' }]
 })
@@ -23,35 +23,58 @@ describe('gitlab webhook', () => {
     expect(badTok.statusCode).toBe(401)
     expect(badTok.json().error.code).toBe('WEBHOOK_SECRET')
   })
+
   it('binds commits whose messages reference resource ids', async () => {
     const { auth, inject } = await setup()
     await seed(inject, auth)
-    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('implement ADR-1 and closes ISSUE-1') })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'evt-1' }, payload: PUSH('implement ADR-1 and closes ISSUE-1') })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ bound: 2, duplicates: 0 })
+    expect(res.json()).toEqual({ bound: 2, duplicates: 0, deduplicated: false })
     const b1 = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/bindings', headers: auth })
     expect(b1.json()[0].sha).toBe('deadbeef')
     expect(b1.json()[0].commit_url).toBe('https://gitlab.example.com/team/core/-/commit/deadbeef')
   })
-  it('is idempotent on repeated event_uuid', async () => {
+
+  it('is idempotent on repeated X-Gitlab-Event-UUID header', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const h = { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'evt-dup' }
+    await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    const dup = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    expect(dup.json()).toEqual({ bound: 0, duplicates: 1, deduplicated: true })
+  })
+
+  it('dedups via webhook-id header as fallback for missing event uuid header', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const h = { 'x-gitlab-token': 's', 'webhook-id': 'wh-7' }
+    await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    const dup = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
+    expect(dup.json()).toEqual({ bound: 0, duplicates: 1, deduplicated: true })
+  })
+
+  it('still dedups on body event_uuid fallback (backward compatibility)', async () => {
     const { auth, inject } = await setup()
     await seed(inject, auth)
     const h = { 'x-gitlab-token': 's' }
-    await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
-    const dup = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: PUSH('refs ADR-1') })
-    expect(dup.json()).toEqual({ bound: 0, duplicates: 1 })
+    const body = { ...PUSH('refs ADR-1'), event_uuid: 'evt-body' }
+    await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: body })
+    const dup = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: h, payload: body })
+    expect(dup.json()).toEqual({ bound: 0, duplicates: 1, deduplicated: true })
   })
+
   it('same commit binding another resource is not a duplicate; unbound refs are ignored', async () => {
     const { auth, inject } = await setup()
     await seed(inject, auth)
-    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: PUSH('ADR-1 ISSUE-1 ADR-99') })
-    expect(res.json()).toEqual({ bound: 2, duplicates: 0 })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'evt-2' }, payload: PUSH('ADR-1 ISSUE-1 ADR-99') })
+    expect(res.json()).toEqual({ bound: 2, duplicates: 0, deduplicated: false })
   })
+
   it('ignores repos not bound to any project', async () => {
     const { auth, inject } = await setup()
     await seed(inject, auth)
     const p = { ...PUSH('refs ADR-1'), project: { git_http_url: 'https://gitlab.example.com/other/x.git' } }
-    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's' }, payload: p })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook', headers: { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'evt-3' }, payload: p })
     expect(res.statusCode).toBe(200)
     expect(res.json().bound).toBe(0)
   })

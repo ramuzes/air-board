@@ -10,7 +10,7 @@ export function registerConnector(app: FastifyInstance, db: DB, plugin: Connecto
   if (plugin.webhookPath) {
     app.post(plugin.webhookPath, async (req) => {
       plugin.verifyWebhook(req)
-      return plugin.handleWebhook(db, req.body)
+      return plugin.handleWebhook(db, req.body, req.headers)
     })
   }
 }
