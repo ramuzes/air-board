@@ -5,6 +5,7 @@ import { getProjectByKey } from '../../store/projects.js'
 import { createResource, listResources, getResourceInternal, listRevisions, getRevision, searchAll, updateResource } from '../../store/resources.js'
 import { addBinding, listBindings } from '../../store/bindings.js'
 import { httpError } from '../errors.js'
+import { commitUrlFor } from '../../plugins/registry.js'
 
 export function projectOr404(db: DB, key: string) {
   const p = getProjectByKey(db, key)
@@ -85,7 +86,7 @@ export function registerResourceRoutes(app: FastifyInstance, db: DB) {
     const p = projectOr404(db, key)
     const r = getResourceInternal(db, p.id, id)
     if (!r) throw httpError(404, 'NOT_FOUND', 'resource ' + id + ' not found')
-    return listBindings(db, r.row.id)
+    return listBindings(db, r.row.id).map((b) => ({ ...b, commit_url: commitUrlFor(b.repo_url, b.sha) }))
   })
 
   app.get('/api/projects/:key/resources/:id/revisions/:rev', { preHandler: [app.requireAuth] }, async (req) => {
