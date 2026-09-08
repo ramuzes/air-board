@@ -1,0 +1,44 @@
+// src/store/users.ts
+import { createHash, randomBytes } from 'node:crypto'
+import type { DB } from './db.js'
+import { httpError } from '../http/errors.js'
+
+export interface UserRow { id: number; username: string; display_name: string; created_at: string }
+export function hashToken(t: string): string { return createHash('sha256').update(t).digest('hex') }
+export function newTokenString(): string { return 'abt_' + randomBytes(16).toString('hex') }
+
+export function createUser(db: DB, input: { username: string; displayName: string }): UserRow {
+  try {
+    const info = db.prepare('INSERT INTO users (username, display_name) VALUES (?, ?)').run(input.username, input.displayName)
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid) as UserRow
+  } catch (e: any) {
+    if (String(e.message).includes('UNIQUE')) throw httpError(409, 'CONFLICT', "username '" + input.username + "' already exists")
+    throw e
+  }
+}
+export function getUser(db: DB, id: number): UserRow | null {
+  return (db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow) ?? null
+}
+export function listUsers(db: DB): UserRow[] {
+  return db.prepare('SELECT * FROM users ORDER BY id').all() as UserRow[]
+}
+export function countUsers(db: DB): number {
+  return (db.prepare('SELECT COUNT(*) AS c FROM users').get() as any).c
+}
+export function createToken(db: DB, userId: number, label: string): { token: string; id: number } {
+  const token = newTokenString()
+  const info = db.prepare('INSERT INTO tokens (user_id, token_hash, label) VALUES (?, ?, ?)').run(userId, hashToken(token), label)
+  return { token, id: Number(info.lastInsertRowid) }
+}
+export function verifyToken(db: DB, token: string): UserRow | null {
+  const row = db.prepare(
+    'SELECT u.* FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked_at IS NULL'
+  ).get(hashToken(token)) as UserRow | undefined
+  return row ?? null
+}
+export function revokeToken(db: DB, tokenId: number): boolean {
+  return db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL").run(tokenId).changes > 0
+}
+export function listTokens(db: DB, userId: number): Array<{ id: number; label: string; created_at: string; revoked_at: string | null }> {
+  return db.prepare('SELECT id, label, created_at, revoked_at FROM tokens WHERE user_id = ? ORDER BY id').all(userId) as any
+}
