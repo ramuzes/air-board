@@ -2,6 +2,8 @@ node_modules/
 dist/
 airboard.db
 *.db
+*.db-wal
+*.db-shm
 .scratch/
 .env
 .env.*
