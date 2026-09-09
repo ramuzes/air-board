@@ -1,0 +1,29 @@
+services:
+  airboard:
+    build: .
+    image: airboard:latest
+    container_name: airboard
+    ports:
+      - "${PORT:-3000}:3000"
+    # Optional: copy .env.example to .env for local overrides.
+    # Values below always win where set, so the DB lands on the volume regardless.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: 3000
+      DB_PATH: /data/airboard.db
+      BASE_URL: ${BASE_URL:-http://localhost:3000}
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:-}
+    volumes:
+      - airboard-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "await fetch('http://127.0.0.1:3000/api/health').then(r => { if (!r.ok) throw new Error('unhealthy') })"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  airboard-data:

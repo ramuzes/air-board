@@ -8,6 +8,14 @@ cp .env.example .env   # edit to taste — bun loads .env automatically
 bun src/index.ts
 ```
 
+Or with Docker (database persisted on the `airboard-data` volume):
+
+```bash
+cp .env.example .env       # optional — compose reads BASE_URL / GITLAB_WEBHOOK_SECRET from it
+docker compose up -d --build
+docker compose logs airboard   # first run prints the one-time bootstrap token
+```
+
 All settings are optional and can also be passed as plain environment variables (env vars and `.env` behave the same; bun auto-loads `.env` from the working directory):
 
 | Var | Default | Purpose |

@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.scratch
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+docs
+tests
