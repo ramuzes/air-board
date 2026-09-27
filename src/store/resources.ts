@@ -48,7 +48,7 @@ export function listResources(db: DB, f: { projectId: number; kind?: string; sta
   if (f.status) { sql += ' AND r.status = ?'; params.push(f.status) }
   else { sql += " AND r.status != 'cancelled'" }
   if (f.q) {
-    const rids = searchFts(db, f.q)
+    const rids = searchFts(db, f.q).map((h) => h.rid)
     if (rids.length === 0) return []
     sql += ' AND r.id IN (' + rids.map((n) => Number(n)).join(',') + ')'
   }
@@ -87,14 +87,42 @@ export function getRevision(db: DB, resourceId: number, rev: number) {
   return (db.prepare('SELECT rev, title, content_markdown, created_by, created_at FROM revisions WHERE resource_id = ? AND rev = ?').get(resourceId, rev) as any) ?? null
 }
 
-export function searchFts(db: DB, q: string): number[] {
+export interface SearchHit {
+  rid: number; score: number; snippet: string
+}
+
+/** Normalize -/_ to spaces outside quoted phrases so paper-trade ≡ paper trade. */
+export function normalizeQuery(q: string): string {
+  return q.split('"').map((seg, i) => (i % 2 === 1 ? seg : seg.replace(/[-_]+/g, ' '))).join('"')
+}
+
+export function searchFts(db: DB, rawQ: string): SearchHit[] {
+  const q = normalizeQuery(rawQ.trim())
+  // Trigram indexes need >= 3 chars; shorter queries (CJK pairs, 2-letter terms)
+  // deliberately use substring matching instead.
+  const bare = q.replace(/"/g, '').replace(/\b(AND|OR|NOT)\b/g, ' ').replace(/[*]/g, '').trim()
+  if (bare.length > 0 && bare.length < 3) {
+    const like = '%' + bare + '%'
+    const rows = db.prepare('SELECT resource_row_id AS rid, title, content FROM resource_fts WHERE title LIKE ? OR content LIKE ?').all(like, like) as any[]
+    return rows.map((r) => ({ rid: r.rid, score: 0, snippet: likeSnippet(String(r.title) + ' — ' + String(r.content), bare) }))
+  }
   try {
-    return (db.prepare('SELECT resource_row_id AS rid FROM resource_fts WHERE resource_fts MATCH ?').all(q) as any[]).map((r) => r.rid)
-  } catch {
-    // invalid FTS5 query syntax (unbalanced quotes, bare operators) -> substring fallback
-    return (db.prepare('SELECT resource_row_id AS rid FROM resource_fts WHERE title LIKE ? OR content LIKE ?').all('%' + q + '%', '%' + q + '%') as any[]).map((r) => r.rid)
+    const rows = db.prepare(
+      "SELECT resource_row_id AS rid, bm25(resource_fts) AS score, snippet(resource_fts, 1, '[', ']', '…', 16) AS snippet FROM resource_fts WHERE resource_fts MATCH ? ORDER BY score"
+    ).all(q) as any[]
+    return rows.map((r) => ({ rid: r.rid, score: r.score, snippet: r.snippet }))
+  } catch (e: any) {
+    throw httpError(400, 'INVALID_QUERY', 'invalid search syntax: ' + (e.message ?? String(e)) + ' — supported: terms, single-quoted-style "phrases" via double quotes, term OR term, prefix*')
   }
 }
-export function searchAll(db: DB, q: string): ResourceView[] {
-  return searchFts(db, q).map((rid) => viewByRowId(db, rid))
+
+function likeSnippet(text: string, needle: string): string {
+  const i = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (i < 0) return text.slice(0, 60)
+  const start = Math.max(0, i - 24)
+  return (start > 0 ? '…' : '') + text.slice(start, i + needle.length + 24)
+}
+
+export function searchAll(db: DB, q: string): Array<ResourceView & { project_id: number; score: number; snippet: string }> {
+  return searchFts(db, q).map((h) => ({ ...viewByRowId(db, h.rid), project_id: h.rid ? (db.prepare('SELECT project_id AS pid FROM resources WHERE id = ?').get(h.rid) as any).pid : 0, score: h.score, snippet: h.snippet }))
 }

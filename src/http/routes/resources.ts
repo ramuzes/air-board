@@ -48,16 +48,37 @@ export function registerResourceRoutes(app: FastifyInstance, db: DB) {
     return updateResource(db, { projectId: p.id, publicId: id, patch: req.body as any, userId: (req as any).user.id })
   })
 
-  app.get('/api/search', { preHandler: [app.requireAuth] }, async (req) => {
-    const q = (req.query as any).q
-    if (!q) return []
-    const hits = searchAll(db, String(q))
-    if (req.scope.isGlobal) return hits
-    const allowed = new Set(req.scope.projectIds)
-    return hits.filter((r: any) => {
-      const pid = (db.prepare('SELECT project_id AS pid FROM resources WHERE kind = ? AND number = ?').get(r.kind, r.number) as any)?.pid
-      return pid !== undefined && allowed.has(pid)
+  app.get('/api/search', {
+    preHandler: [app.requireAuth],
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['q'],
+        properties: {
+          q: { type: 'string', minLength: 1, description: 'FTS5 syntax: terms, "quoted phrases", term OR term, prefix*. Hyphens/underscores are treated as spaces. >=3 chars use the trigram index (substring matching, incl. CJK); shorter terms fall back to substring scan.' },
+          kind: { type: 'string', enum: ['ADR', 'PRD', 'SPEC', 'PLAN', 'ISSUE'] },
+          status: { type: 'string', enum: ['draft', 'active', 'done', 'cancelled'] },
+          project_key: { type: 'string' },
+          fields: { type: 'string', enum: ['slim', 'full'], description: 'slim (default): id/kind/project_key/title/status/snippet/score; full adds content_markdown/rev/created_by/timestamps' },
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+          offset: { type: 'integer', minimum: 0, default: 0 }
+        }
+      }
+    }
+  }, async (req) => {
+    const qs = req.query as any
+    const hits = searchAll(db, String(qs.q))
+    const allowed = req.scope.isGlobal ? null : new Set(req.scope.projectIds)
+    const filtered = hits.filter((r: any) => {
+      if (allowed && !allowed.has(r.project_id)) return false
+      if (qs.kind && r.kind !== qs.kind) return false
+      if (qs.status && r.status !== qs.status) return false
+      if (qs.project_key && r.project_key !== qs.project_key) return false
+      return true
     })
+    const page = filtered.slice(Number(qs.offset ?? 0), Number(qs.offset ?? 0) + Number(qs.limit ?? 50))
+    if (qs.fields === 'full') return page
+    return page.map(({ content_markdown, rev, created_by, created_at, updated_at, number, project_id, ...slim }: any) => slim)
   })
 
   app.get('/api/projects/:key/resources/:id', { preHandler: [app.requireAuth] }, async (req) => {

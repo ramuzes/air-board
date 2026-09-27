@@ -23,7 +23,7 @@ export function agentInstructions(baseUrl: string) {
       read: 'GET /api/projects/{key}/resources/{id} (latest) or /revisions/{rev} (any revision)',
       update: 'PATCH /api/projects/{key}/resources/{id} body: { title?, content_markdown?, status? } - content change appends a revision',
       commit_refs: 'write KIND-number tokens in git commit messages; pushes via GitLab webhook bind commits automatically',
-      search: 'GET /api/search?q=<terms> for full-text search across all projects (FTS5 over title+content); or ?q= on the project resource list'
+      search: 'GET /api/search?q=<query>&kind=&status=&project_key=&limit=&offset=&fields= — full-text search across all projects (trigram FTS5 over title+latest content: substring matching works for CJK and latin, e.g. 龙虎 finds 龙虎榜). Syntax in q: bare terms (implicit AND), "quoted phrases" (adjacency), term OR term, prefix* — hyphens/underscores are treated as spaces. Queries of 1-2 characters fall back to plain substring scan. Invalid syntax returns 400 INVALID_QUERY. Default response is slim: {id, kind, project_key, title, status, snippet, score} ordered by relevance (lower score = better); ?fields=full adds content_markdown and other fields. Same ?q= works on the project resource list'
     },
     endpoints: {
       health: '/api/health', users: '/api/users', tokens: '/api/users/{id}/tokens',
@@ -55,7 +55,7 @@ export function agentsMd(): string {
     '- Update: \`PATCH /api/projects/{key}/resources/{id}\` — content/title changes append a revision; \`status\` transitions lifecycle (draft->active->done, or ->cancelled).',
     '- Cancel unneeded work: \`PATCH\` with \`{ "status": "cancelled" }\`. Cancelled resources are kept for history.',
     '- Commits: reference ids in commit messages (\`fix ADR-42\`); the GitLab webhook records the binding automatically.',
-    '- Search: \`GET /api/search?q=terms\` full-text search across all projects (FTS5 over titles and latest content).',
+    '- Search: \`GET /api/search?q=terms\` full-text search across all projects (trigram FTS5 over titles and latest content — substring matching works for CJK and latin). Query syntax: bare terms (AND), \"quoted phrases\", \`term OR term\`, \`prefix*\`; hyphens/underscores = spaces; 1-2 char queries use substring scan; bad syntax = 400. Filters: kind, status, project_key, limit/offset. Slim hits {id, kind, project_key, title, status, snippet, score} by relevance; \`&fields=full\` adds content.',
     '',
     '## Rules',
     '- IDs are allocated by the server only; never invent one.',

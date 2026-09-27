@@ -81,6 +81,10 @@ curl -X POST $B/api/projects/CORE/resources -H "Authorization: Bearer $T" \
 # list (kind/status filters); full-text search across ALL projects
 curl "$B/api/projects/CORE/resources?kind=ADR" -H "Authorization: Bearer $T"
 curl "$B/api/search?q=sqlite" -H "Authorization: Bearer $T"
+# search syntax: terms, "quoted phrases", term OR term, prefix*; hyphens = spaces;
+# CJK and latin substrings work (trigram). Filters: kind, status, project_key, limit/offset.
+# Slim hits (snippet + score) by default; add &fields=full for full content.
+# Example: curl "$B/api/search?q=%E9%BE%99%E8%99%8E&kind=ADR" -H "Authorization: Bearer $T"
 
 # read any revision
 curl "$B/api/projects/CORE/resources/ADR-1/revisions/1" -H "Authorization: Bearer $T"

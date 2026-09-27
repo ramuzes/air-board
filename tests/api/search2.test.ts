@@ -1,0 +1,88 @@
+import { describe, it, expect } from 'bun:test'
+import { setup } from '../helpers.js'
+
+async function seed(inject: any, auth: any) {
+  await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'ONE', name: 'One' } })
+  await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'TWO', name: 'Two' } })
+  await inject({ method: 'POST', url: '/api/projects/ONE/resources', headers: auth, payload: { kind: 'ADR', title: 'paper trade strategy', markdown: 'we paper trade the loop and trade paper notes' } })
+  await inject({ method: 'POST', url: '/api/projects/ONE/resources', headers: auth, payload: { kind: 'ISSUE', title: 'simulation notes', markdown: 'the simulation deck for sim runs' } })
+  await inject({ method: 'POST', url: '/api/projects/TWO/resources', headers: auth, payload: { kind: 'ADR', title: 'CJK doc', markdown: '研究龙虎榜数据的模拟仓' } })
+  await inject({ method: 'POST', url: '/api/projects/TWO/resources', headers: auth, payload: { kind: 'ISSUE', title: 'hyphen case', markdown: 'contains paper-trade and paper_trade literals' } })
+}
+
+describe('search v2', () => {
+  it('documents and supports OR, phrase, prefix', async () => {
+    const { app, auth, inject } = await setup()
+    await seed(inject, auth)
+    const or = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('paper OR simulation'), headers: auth })
+    expect(or.statusCode).toBe(200)
+    expect(or.json().length).toBeGreaterThanOrEqual(3)
+    const phrase = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('"paper trade"'), headers: auth })
+    expect(phrase.statusCode).toBe(200)
+    expect(phrase.json().length).toBeLessThan(or.json().length)
+    const prefix = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('simu*'), headers: auth })
+    expect(prefix.statusCode).toBe(200)
+    expect(prefix.json().length).toBeGreaterThanOrEqual(1)
+  })
+  it('invalid FTS syntax is 400, not silent degradation', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const bad = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('"unclosed'), headers: auth })
+    expect(bad.statusCode).toBe(400)
+    expect(bad.json().error.code).toBe('INVALID_QUERY')
+  })
+  it('CJK substring matches via trigram (and 2-char via fallback)', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const two = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('龙虎'), headers: auth })
+    expect(two.statusCode).toBe(200)
+    expect(two.json().map((r: any) => r.id)).toContain('ADR-1')
+    const three = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('龙虎榜'), headers: auth })
+    expect(three.json().map((r: any) => r.id)).toContain('ADR-1')
+    const simcang = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('模拟仓'), headers: auth })
+    expect(simcang.json().map((r: any) => r.id)).toContain('ADR-1')
+  })
+  it('hyphen and underscore normalize to space', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const hyphen = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('paper-trade'), headers: auth })
+    const space = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('paper trade'), headers: auth })
+    expect(hyphen.json().map((r: any) => r.id).sort()).toEqual(space.json().map((r: any) => r.id).sort())
+  })
+  it('slim response with snippet and score; fields=full restores content', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const res = await inject({ method: 'GET', url: '/api/search?q=paper', headers: auth })
+    expect(res.statusCode).toBe(200)
+    const first = res.json()[0]
+    expect(first.id).toBeTruthy()
+    expect(first.project_key).toBeTruthy()
+    expect(typeof first.snippet).toBe('string')
+    expect(typeof first.score).toBe('number')
+    expect(first.content_markdown).toBeUndefined()
+    const full = await inject({ method: 'GET', url: '/api/search?q=paper&fields=full', headers: auth })
+    expect(full.json()[0].content_markdown).toBeTruthy()
+  })
+  it('filters: kind, status, project_key; pagination limit/offset', async () => {
+    const { auth, inject } = await setup()
+    await seed(inject, auth)
+    const kind = await inject({ method: 'GET', url: '/api/search?q=paper&kind=ISSUE', headers: auth })
+    expect(kind.json().every((r: any) => r.kind === 'ISSUE')).toBe(true)
+    const proj = await inject({ method: 'GET', url: '/api/search?q=paper&project_key=ONE', headers: auth })
+    expect(proj.json().every((r: any) => r.project_key === 'ONE')).toBe(true)
+    const page = await inject({ method: 'GET', url: '/api/search?q=paper&limit=1&offset=0', headers: auth })
+    expect(page.json()).toHaveLength(1)
+    const page2 = await inject({ method: 'GET', url: '/api/search?q=paper&limit=1&offset=1', headers: auth })
+    expect(page2.json()[0].id).not.toBe(page.json()[0].id)
+    const status = await inject({ method: 'GET', url: '/api/search?q=paper&status=draft', headers: auth })
+    expect(status.json().length).toBeGreaterThan(0)
+  })
+  it('scoped tokens only see their projects in search', async () => {
+    const { app, auth, inject } = await setup()
+    await seed(inject, auth)
+    const mint = await inject({ method: 'POST', url: '/api/users/1/tokens', headers: auth, payload: { label: 's', global: false, project_keys: ['ONE'] } })
+    const scoped = { authorization: 'Bearer ' + mint.json().token }
+    const res = await inject({ method: 'GET', url: '/api/search?q=paper', headers: scoped })
+    expect(res.json().every((r: any) => r.project_key === 'ONE')).toBe(true)
+  })
+})

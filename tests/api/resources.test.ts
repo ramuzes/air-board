@@ -74,6 +74,7 @@ describe('resources api', () => {
     expect(res.json()).toHaveLength(1)
     expect(res.json()[0].project_key).toBe('TWO')
     const junk = await inject({ method: 'GET', url: '/api/search?q=' + encodeURIComponent('NEAR('), headers: auth })
-    expect(junk.statusCode).toBe(200)
+    expect(junk.statusCode).toBe(400)
+    expect(junk.json().error.code).toBe('INVALID_QUERY')
   })
 })
