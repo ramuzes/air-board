@@ -8,7 +8,8 @@ export function agentInstructions(baseUrl: string) {
     base_url: baseUrl,
     auth: {
       scheme: 'bearer', header: 'Authorization', token_prefix: 'abt_',
-      how_to_get: ['Ask your sponsoring user to mint a token: POST /api/users/{id}/tokens', 'Or use the web UI token page at /tokens']
+      how_to_get: ['Ask your sponsoring user to mint a token: POST /api/users/{id}/tokens', 'Or use the web UI token page at /tokens'],
+      scope: 'Tokens are either global or bound to specific projects. Scoped tokens: body { label, global: false, project_keys: ["KEY"] }; they get 403 FORBIDDEN on unbound projects, see only bound projects in GET /api/projects and /api/search, and cannot manage users/tokens/projects (global-only). Rebind with PUT /api/tokens/{id}/projects body { project_keys }'
     },
     resource_kinds: ['ADR', 'PRD', 'SPEC', 'PLAN', 'ISSUE'],
     id_format: 'KIND-number (e.g. ADR-42); allocated by AirBoard at creation, monotonic per project+kind, gaps possible, never reused',
@@ -58,6 +59,7 @@ export function agentsMd(): string {
     '',
     '## Rules',
     '- IDs are allocated by the server only; never invent one.',
+    '- Tokens are global or project-scoped; if you get 403 FORBIDDEN, your token is not bound to that project — ask for a rebinding.',
     '- Revision history is append-only; revert by posting old content forward.',
     '- Write clear titles and markdown bodies — humans read these too.',
     ''

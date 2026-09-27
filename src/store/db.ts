@@ -13,8 +13,14 @@ CREATE TABLE IF NOT EXISTS tokens (
   user_id INTEGER NOT NULL REFERENCES users(id),
   token_hash TEXT NOT NULL UNIQUE,
   label TEXT NOT NULL DEFAULT '',
+  is_global INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS token_projects (
+  token_id INTEGER NOT NULL REFERENCES tokens(id),
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  UNIQUE (token_id, project_id)
 );
 CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,5 +80,11 @@ export function openDb(path: string): DB {
   db.exec("PRAGMA journal_mode = WAL")
   db.exec("PRAGMA foreign_keys = ON")
   db.exec(SCHEMA)
+  // Migration for databases created before token scoping: the tokens table there
+  // lacks is_global. Pre-existing tokens become global so nothing breaks.
+  const cols = db.prepare("PRAGMA table_info(tokens)").all() as any[]
+  if (!cols.some((c) => c.name === 'is_global')) {
+    db.exec('ALTER TABLE tokens ADD COLUMN is_global INTEGER NOT NULL DEFAULT 1')
+  }
   return db
 }

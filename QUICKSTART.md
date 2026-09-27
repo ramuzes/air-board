@@ -54,10 +54,20 @@ curl -X POST $B/api/users -H "Authorization: Bearer $T" \
 curl -X POST $B/api/users/2/tokens -H "Authorization: Bearer $T" \
   -H "content-type: application/json" -d '{"label":"cli"}'
 
-# create a project
+# create a project (also possible in the web UI on the home page)
 curl -X POST $B/api/projects -H "Authorization: Bearer $T" \
   -H "content-type: application/json" \
   -d '{"key":"CORE","name":"My Project"}'
+
+# mint a PROJECT-SCOPED token (access control): sees only CORE, 403 elsewhere
+# scoped tokens cannot manage users/tokens/projects; unbound+non-global sees nothing
+curl -X POST $B/api/users/2/tokens -H "Authorization: Bearer $T" \
+  -H "content-type: application/json" \
+  -d '{"label":"agent-core","global":false,"project_keys":["CORE"]}'
+
+# rebind a token to different projects later
+curl -X PUT $B/api/tokens/<id>/projects -H "Authorization: Bearer $T" \
+  -H "content-type: application/json" -d '{"project_keys":["CORE","OTHER"]}'
 ```
 
 ## 4. Everyday usage

@@ -5,7 +5,7 @@ import formbody from '@fastify/formbody'
 import swagger from '@fastify/swagger'
 import type { Config } from '../config.js'
 import type { DB } from '../store/db.js'
-import { makeRequireAuth } from './auth.js'
+import { makeRequireAuth, makeRequireGlobal } from './auth.js'
 import { registerUserRoutes } from './routes/users.js'
 import { registerProjectRoutes } from './routes/projects.js'
 import { registerResourceRoutes } from './routes/resources.js'
@@ -38,6 +38,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   })
   // inside buildApp, before route registrations:
   app.decorate('requireAuth', makeRequireAuth(opts.db))
+  app.decorate('requireGlobal', makeRequireGlobal())
   registerUserRoutes(app, opts.db)
   registerProjectRoutes(app, opts.db)
   registerResourceRoutes(app, opts.db)
