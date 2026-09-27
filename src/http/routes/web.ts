@@ -2,7 +2,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { DB } from '../../store/db.js'
 import { verifyToken, createToken, revokeToken, listTokens, bindTokenToProjects } from '../../store/users.js'
-import { listProjects, getProjectByKey, createProject } from '../../store/projects.js'
+import { listProjects, getProjectByKey, createProject, updateProject } from '../../store/projects.js'
 import { getResourceInternal, listResources, updateResource, listRevisions } from '../../store/resources.js'
 import { listBindings } from '../../store/bindings.js'
 import { webSession, canAccessProject } from '../auth.js'
@@ -89,7 +89,18 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
     const rows = listResources(db, { projectId: p.id, kind: q.kind, status: q.status, q: q.q })
       .map((r) => '<tr><td>' + esc(r.id) + '</td><td><a href="/p/' + esc(p.key) + '/' + r.id + '">' + esc(r.title) + '</a></td><td>' + esc(r.kind) + '</td><td>' + esc(r.status) + '</td><td>' + r.rev + '</td></tr>').join('')
     reply.type('text/html')
-    return layout(p.key + ' resources', '<table><tr><th>ID</th><th>Title</th><th>Kind</th><th>Status</th><th>Rev</th></tr>' + rows + '</table><form method="get"><input name="q" placeholder="search"><button>Search</button></form>')
+    const s = webSession(db, req)!
+    const repoForm = s.scope.isGlobal
+      ? '<h2>GitLab</h2><p>Current repo: <code>' + esc(p.gitlab_repo_url ?? 'none') + '</code></p>' +
+        '<form method="post" action="/p/' + esc(p.key) + '/repo">' +
+        '<input name="gitlab_repo_url" placeholder="https://gitlab.example.com/team/repo.git" style="width:60%" value="' + esc(p.gitlab_repo_url ?? '') + '">' +
+        ' <button>Save repo URL</button></form>' +
+        '<p>Pushes to this repo are matched to ' + esc(p.key) + '; commit messages referencing IDs (e.g. ADR-1) are auto-bound.</p>'
+      : ''
+    reply.type('text/html')
+    return layout(p.key + ' resources',
+      '<table><tr><th>ID</th><th>Title</th><th>Kind</th><th>Status</th><th>Rev</th></tr>' + rows + '</table>' +
+      '<form method="get"><input name="q" placeholder="search"><button>Search</button></form>' + repoForm)
   })
 
   app.get('/p/:key/:id', { preHandler: [requireWeb] }, async (req: any, reply) => {
@@ -111,6 +122,13 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
       '<button>Save (new revision)</button></form>' +
       '<h2>Revisions</h2><table><tr><th>Rev</th><th>Title</th><th>At</th></tr>' + revs + '</table>' +
       '<h2>Commit bindings</h2><table><tr><th>Repo</th><th>SHA</th><th>Pushed</th></tr>' + binds + '</table>')
+  })
+
+  app.post('/p/:key/repo', { preHandler: [requireGlobalWeb] }, async (req: any, reply) => {
+    const p = getProjectByKey(db, req.params.key)
+    if (!p) throw httpError(404, 'NOT_FOUND', 'project not found')
+    updateProject(db, p.key, { gitlab_repo_url: req.body?.gitlab_repo_url ? String(req.body.gitlab_repo_url) : null })
+    return reply.redirect('/p/' + p.key)
   })
 
   app.post('/p/:key/:id/edit', { preHandler: [requireWeb] }, async (req: any, reply) => {

@@ -30,6 +30,21 @@ describe('web UI scoping and project creation', () => {
     const tokens = await inject({ method: 'GET', url: '/tokens', headers: { cookie: scoped } })
     expect(tokens.statusCode).toBe(403)
   })
+  it('global session can change the gitlab repo url from the project page', async () => {
+    const { auth, inject } = await setup()
+    const tok = (auth.authorization.match(/Bearer (.+)/) as any)[1]
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'GL', name: 'Git' } })
+    const page = await inject({ method: 'GET', url: '/p/GL', headers: { cookie: 'ab_token=' + tok } })
+    expect(page.statusCode).toBe(200)
+    expect(page.body).toContain('GitLab')
+    expect(page.body).toContain('Current repo')
+    const save = await inject({ method: 'POST', url: '/p/GL/repo', headers: { cookie: 'ab_token=' + tok, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'gitlab_repo_url=https%3A%2F%2Fgitlab.example.com%2Fteam%2Fgl.git' })
+    expect(save.statusCode).toBe(302)
+    const after = await inject({ method: 'GET', url: '/p/GL', headers: { cookie: 'ab_token=' + tok } })
+    expect(after.body).toContain('https://gitlab.example.com/team/gl.git')
+    const viaApi = await inject({ method: 'GET', url: '/api/projects/GL', headers: auth })
+    expect(viaApi.json().gitlab_repo_url).toBe('https://gitlab.example.com/team/gl.git')
+  })
   it('tokens page shows scope and rebinds projects via checkboxes', async () => {
     const { app, auth, inject } = await setup()
     const tok = (auth.authorization.match(/Bearer (.+)/) as any)[1]
