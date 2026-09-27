@@ -15,7 +15,7 @@ describe('connector registry', () => {
     expect(res.statusCode).toBe(401)
   })
   it('derives commit urls, stripping .git', () => {
-    const p = createGitlabPlugin({ dbPath: ':memory:', port: 1, baseUrl: 'http://x', gitlabWebhookSecret: 's' })
+    const p = createGitlabPlugin({ dbPath: ':memory:', port: 1, baseUrl: 'http://x', gitlabWebhookSecret: 's', initialAccessToken: '' })
     expect(p.commitUrl!('https://gitlab.example.com/team/core.git', 'abc')).toBe('https://gitlab.example.com/team/core/-/commit/abc')
   })
 })

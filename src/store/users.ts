@@ -25,8 +25,8 @@ export function listUsers(db: DB): UserRow[] {
 export function countUsers(db: DB): number {
   return (db.prepare('SELECT COUNT(*) AS c FROM users').get() as any).c
 }
-export function createToken(db: DB, userId: number, label: string): { token: string; id: number } {
-  const token = newTokenString()
+export function createToken(db: DB, userId: number, label: string, tokenValue?: string): { token: string; id: number } {
+  const token = tokenValue ?? newTokenString()
   const info = db.prepare('INSERT INTO tokens (user_id, token_hash, label) VALUES (?, ?, ?)').run(userId, hashToken(token), label)
   return { token, id: Number(info.lastInsertRowid) }
 }

@@ -24,6 +24,7 @@ All settings are optional and can also be passed as plain environment variables 
 | `DB_PATH` | ./airboard.db | SQLite database file (created if missing) |
 | `BASE_URL` | http://localhost:3000 | advertised in agent instructions |
 | `GITLAB_WEBHOOK_SECRET` | (unset) | shared secret for the GitLab webhook — until set, the webhook answers 503 NOT_CONFIGURED |
+| `INITIAL_ACCESS_TOKEN` | (unset) | token for the first-run bootstrap admin — empty: generated and logged once; set: your exact token is used and never logged |
 
 `.env` is git-ignored (it holds secrets); `.env.example` documents every variable.
 
