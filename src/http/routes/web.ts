@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import type { DB } from '../../store/db.js'
 import { verifyToken, createToken, revokeToken, listTokens, bindTokenToProjects } from '../../store/users.js'
 import { listProjects, getProjectByKey, createProject, updateProject } from '../../store/projects.js'
-import { getResourceInternal, listResources, updateResource, listRevisions } from '../../store/resources.js'
+import { getResourceInternal, listResources, updateResource, listRevisions, countResources } from '../../store/resources.js'
 import { listBindings } from '../../store/bindings.js'
 import { webSession, canAccessProject } from '../auth.js'
 import { commitUrlFor } from '../../plugins/registry.js'
@@ -86,8 +86,27 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
   app.get('/p/:key', { preHandler: [requireWeb] }, async (req: any, reply) => {
     const p = projectOr403(db, req, req.params.key)
     const q = req.query as any
-    const rows = listResources(db, { projectId: p.id, kind: q.kind, status: q.status, q: q.q })
+    const PAGE_SIZE = 50
+    const page = Math.max(1, Number(q.page ?? 1) || 1)
+    const filters = { projectId: p.id, kind: q.kind, status: q.status, q: q.q }
+    const total = countResources(db, filters)
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+    const rows = listResources(db, { ...filters, order: 'created_desc', limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })
       .map((r) => '<tr><td>' + esc(r.id) + '</td><td><a href="/p/' + esc(p.key) + '/' + r.id + '">' + esc(r.title) + '</a></td><td>' + esc(r.kind) + '</td><td>' + esc(r.status) + '</td><td>' + r.rev + '</td></tr>').join('')
+    const qs = (extra: Record<string, string>) => {
+      const sp = new URLSearchParams()
+      for (const [k, v] of Object.entries({ kind: q.kind, status: q.status, q: q.q, ...extra })) if (v) sp.set(k, String(v))
+      const s = sp.toString()
+      return s ? '?' + s : ''
+    }
+    const pager = pages > 1
+      ? '<p>' +
+        (page > 1 ? '<a href="/p/' + esc(p.key) + qs({ page: String(page - 1) }) + '">&laquo; prev</a> ' : '') +
+        'page ' + page + ' / ' + pages +
+        (page < pages ? ' <a href="/p/' + esc(p.key) + qs({ page: String(page + 1) }) + '">next &raquo;</a>' : '') +
+        '</p>'
+      : ''
+    const searchForm = '<form method="get"><input name="q" placeholder="search" value="' + esc(q.q ?? '') + '">' + (q.kind ? '<input type="hidden" name="kind" value="' + esc(q.kind) + '">' : '') + '<button>Search</button></form>'
     reply.type('text/html')
     const s = webSession(db, req)!
     const repoForm = s.scope.isGlobal
@@ -100,7 +119,7 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
     reply.type('text/html')
     return layout(p.key + ' resources',
       '<table><tr><th>ID</th><th>Title</th><th>Kind</th><th>Status</th><th>Rev</th></tr>' + rows + '</table>' +
-      '<form method="get"><input name="q" placeholder="search"><button>Search</button></form>' + repoForm)
+      searchForm + pager + repoForm)
   })
 
   app.get('/p/:key/:id', { preHandler: [requireWeb] }, async (req: any, reply) => {

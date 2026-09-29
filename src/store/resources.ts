@@ -41,19 +41,33 @@ function viewByRowId(db: DB, rowId: number): ResourceView {
   }
 }
 
-export function listResources(db: DB, f: { projectId: number; kind?: string; status?: string; q?: string }): ResourceView[] {
-  let sql = 'SELECT r.id AS rid FROM resources r WHERE r.project_id = ?'
+function resourceFilterSql(db: DB, f: { projectId: number; kind?: string; status?: string; q?: string }): { where: string; params: any[] } {
+  let where = 'r.project_id = ?'
   const params: any[] = [f.projectId]
-  if (f.kind) { sql += ' AND r.kind = ?'; params.push(f.kind) }
-  if (f.status) { sql += ' AND r.status = ?'; params.push(f.status) }
-  else { sql += " AND r.status != 'cancelled'" }
+  if (f.kind) { where += ' AND r.kind = ?'; params.push(f.kind) }
+  if (f.status) { where += ' AND r.status = ?'; params.push(f.status) }
+  else { where += " AND r.status != 'cancelled'" }
   if (f.q) {
     const rids = searchFts(db, f.q).map((h) => h.rid)
-    if (rids.length === 0) return []
-    sql += ' AND r.id IN (' + rids.map((n) => Number(n)).join(',') + ')'
+    if (rids.length === 0) return { where: '1 = 0', params: [] }
+    where += ' AND r.id IN (' + rids.map((n) => Number(n)).join(',') + ')'
   }
-  sql += ' ORDER BY r.kind, r.number'
+  return { where, params }
+}
+
+export function listResources(db: DB, f: { projectId: number; kind?: string; status?: string; q?: string; order?: 'kind' | 'created_desc'; limit?: number; offset?: number }): ResourceView[] {
+  const { where, params } = resourceFilterSql(db, f)
+  let sql = 'SELECT r.id AS rid FROM resources r WHERE ' + where
+  if (f.order === 'created_desc') sql += ' ORDER BY r.id DESC'
+  else sql += ' ORDER BY r.kind, r.number'
+  if (f.limit !== undefined) { sql += ' LIMIT ?'; params.push(f.limit) }
+  if (f.offset !== undefined) { sql += ' OFFSET ?'; params.push(f.offset) }
   return (db.prepare(sql).all(...params) as any[]).map((r) => viewByRowId(db, r.rid))
+}
+
+export function countResources(db: DB, f: { projectId: number; kind?: string; status?: string; q?: string }): number {
+  const { where, params } = resourceFilterSql(db, f)
+  return (db.prepare('SELECT COUNT(*) AS c FROM resources r WHERE ' + where).get(...params) as any).c
 }
 
 export function updateResource(db: DB, input: { projectId: number; publicId: string; patch: { title?: string; content_markdown?: string; status?: string }; userId: number }): ResourceView {
