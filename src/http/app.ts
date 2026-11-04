@@ -46,7 +46,7 @@ export async function buildApp(opts: BuildOpts): Promise<FastifyInstance> {
   registerAgentRoutes(app, opts.config)
   registerWebRoutes(app, opts.db)
   app.get('/api/plugins', { preHandler: [app.requireAuth] }, async () =>
-    listConnectors().map((c) => ({ id: c.id, display_name: c.displayName, webhook_url: c.webhookPath })))
+    listConnectors().map((c) => ({ id: c.id, display_name: c.displayName, webhook_url: c.webhookPath, webhook_url_template: c.webhookProjectParam ? c.webhookPath + '/{' + c.webhookProjectParam + '}' : undefined })))
   app.get('/api/health', async () => ({ status: 'ok' }))
   // after all routes are registered:
   app.get('/openapi.json', async () => app.swagger())

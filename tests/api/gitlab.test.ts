@@ -70,6 +70,49 @@ describe('gitlab webhook', () => {
     expect(res.json()).toEqual({ bound: 2, duplicates: 0, deduplicated: false })
   })
 
+  it('binds via project-key route without any repo URL configured', async () => {
+    const { auth, inject } = await setup()
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'A', markdown: 'm' } })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook/CORE', headers: { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'key-1' }, payload: PUSH('implement ADR-1') })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ bound: 1, duplicates: 0, deduplicated: false })
+    const b = await inject({ method: 'GET', url: '/api/projects/CORE/resources/ADR-1/bindings', headers: auth })
+    expect(b.json()[0].commit_url).toBe('https://gitlab.example.com/team/core/-/commit/deadbeef')
+  })
+
+  it('project-key route 404s for unknown project key', async () => {
+    const { inject } = await setup()
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook/NOPE', headers: { 'x-gitlab-token': 's' }, payload: PUSH('refs ADR-1') })
+    expect(res.statusCode).toBe(404)
+    expect(res.json().error.code).toBe('NOT_FOUND')
+  })
+
+  it('project-key route still requires the secret', async () => {
+    const { inject } = await setup()
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook/CORE', payload: PUSH('refs ADR-1') })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('project-key route dedups by event uuid', async () => {
+    const { auth, inject } = await setup()
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'A', markdown: 'm' } })
+    const h = { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'key-dup' }
+    await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook/CORE', headers: h, payload: PUSH('refs ADR-1') })
+    const dup = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook/CORE', headers: h, payload: PUSH('refs ADR-1') })
+    expect(dup.json()).toEqual({ bound: 0, duplicates: 1, deduplicated: true })
+  })
+
+  it('project-key route does not consult gitlab_repo_url (payload repo may differ)', async () => {
+    const { auth, inject } = await setup()
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core', gitlab_repo_url: 'https://gitlab.example.com/something/else.git' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'A', markdown: 'm' } })
+    const res = await inject({ method: 'POST', url: '/api/plugins/gitlab/webhook/CORE', headers: { 'x-gitlab-token': 's', 'x-gitlab-event-uuid': 'key-2' }, payload: PUSH('refs ADR-1') })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().bound).toBe(1)
+  })
+
   it('ignores repos not bound to any project', async () => {
     const { auth, inject } = await setup()
     await seed(inject, auth)

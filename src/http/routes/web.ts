@@ -110,11 +110,14 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
     reply.type('text/html')
     const s = webSession(db, req)!
     const repoForm = s.scope.isGlobal
-      ? '<h2>GitLab</h2><p>Current repo: <code>' + esc(p.gitlab_repo_url ?? 'none') + '</code></p>' +
+      ? '<h2>GitLab</h2>' +
+        '<p>Project webhook URL (fill this into the GitLab repo webhook, Push events, with the X-Gitlab-Token secret):<br>' +
+        '<code>POST &lt;base-url&gt;/api/plugins/gitlab/webhook/' + esc(p.key) + '</code></p>' +
+        '<p>Commits pushed with messages referencing IDs (e.g. ADR-1) are auto-bound to ' + esc(p.key) + '.</p>' +
+        '<p>Repo URL (display only, used by the legacy fixed-path webhook): <code>' + esc(p.gitlab_repo_url ?? 'none') + '</code></p>' +
         '<form method="post" action="/p/' + esc(p.key) + '/repo">' +
         '<input name="gitlab_repo_url" placeholder="https://gitlab.example.com/team/repo.git" style="width:60%" value="' + esc(p.gitlab_repo_url ?? '') + '">' +
-        ' <button>Save repo URL</button></form>' +
-        '<p>Pushes to this repo are matched to ' + esc(p.key) + '; commit messages referencing IDs (e.g. ADR-1) are auto-bound.</p>'
+        ' <button>Save repo URL</button></form>'
       : ''
     reply.type('text/html')
     return layout(p.key + ' resources',

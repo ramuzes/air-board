@@ -7,7 +7,7 @@ describe('connector registry', () => {
     const { auth, inject } = await setup()
     const res = await inject({ method: 'GET', url: '/api/plugins', headers: auth })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual([{ id: 'gitlab', display_name: 'GitLab', webhook_url: '/api/plugins/gitlab/webhook' }])
+    expect(res.json()).toEqual([{ id: 'gitlab', display_name: 'GitLab', webhook_url: '/api/plugins/gitlab/webhook', webhook_url_template: '/api/plugins/gitlab/webhook/{project}' }])
   })
   it('requires auth', async () => {
     const { inject } = await setup()

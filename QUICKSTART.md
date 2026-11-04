@@ -107,7 +107,7 @@ curl -X PATCH $B/api/projects/CORE -H "Authorization: Bearer $T" \
   -d '{"gitlab_repo_url":"https://gitlab.example.com/team/core.git"}'
 ```
 
-2) In GitLab: **Settings → Webhooks** → URL `$B/api/plugins/gitlab/webhook`, trigger *Push events*, secret = your `GITLAB_WEBHOOK_SECRET`.
+2) In GitLab: **Settings → Webhooks** → URL `$B/api/plugins/gitlab/webhook/CORE` (project key in the path binds the repo to that AirBoard project; no repo-URL config needed), trigger *Push events*, secret = your `GITLAB_WEBHOOK_SECRET`. Unknown project keys return 404. (The legacy URL `$B/api/plugins/gitlab/webhook` still matches by the repo URL configured in step 1.)
 
 3) Now commit messages mentioning `ADR-1`, `ISSUE-345`, … auto-bind on every push:
 

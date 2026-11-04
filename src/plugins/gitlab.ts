@@ -16,7 +16,7 @@ function headerValue(headers: Headers | undefined, name: string): string | null 
   return typeof s === 'string' && s.length > 0 ? s : null
 }
 
-export function handleGitlabPush(db: DB, payload: any, headers?: Headers): { bound: number; duplicates: number; deduplicated: boolean } {
+export function handleGitlabPush(db: DB, payload: any, headers?: Headers, projectKey?: string): { bound: number; duplicates: number; deduplicated: boolean } {
   return db.transaction(() => {
     // Real GitLab sends the event UUID only in headers (X-Gitlab-Event-UUID; also webhook-id / Idempotency-Key).
     // The body field is kept as a backward-compatible fallback.
@@ -33,8 +33,16 @@ export function handleGitlabPush(db: DB, payload: any, headers?: Headers): { bou
       eventId = Number(info.lastInsertRowid)
     }
     const repoUrl: string | undefined = payload.project?.git_http_url ?? payload.project?.web_url
-    const project = repoUrl ? (db.prepare('SELECT * FROM projects WHERE gitlab_repo_url = ?').get(repoUrl) as any) : null
-    if (!project) return { bound: 0, duplicates: 0, deduplicated: false }
+    // Project resolution: the project-key route (/webhook/:key) binds by key and 404s when unknown;
+    // the legacy fixed path (/webhook) matches by repo URL exactly, as before.
+    let project: any = null
+    if (projectKey !== undefined) {
+      project = db.prepare('SELECT * FROM projects WHERE key = ?').get(projectKey) ?? null
+      if (!project) throw httpError(404, 'NOT_FOUND', 'project ' + projectKey + ' not found')
+    } else {
+      project = repoUrl ? (db.prepare('SELECT * FROM projects WHERE gitlab_repo_url = ?').get(repoUrl) as any) : null
+      if (!project) return { bound: 0, duplicates: 0, deduplicated: false }
+    }
     let bound = 0, duplicates = 0
     for (const c of (payload.commits ?? []) as any[]) {
       const sha = String(c.id ?? '')
@@ -45,7 +53,7 @@ export function handleGitlabPush(db: DB, payload: any, headers?: Headers): { bou
         const r = db.prepare('SELECT * FROM resources WHERE project_id = ? AND kind = ? AND number = ?')
           .get(project.id, parsed.kind, parsed.number) as any
         if (!r) continue
-        const res = addBinding(db, { projectId: project.id, resourceRowId: r.id, repoUrl: repoUrl!, sha, ref, pushedAt, webhookEventId: eventId })
+        const res = addBinding(db, { projectId: project.id, resourceRowId: r.id, repoUrl: repoUrl ?? project.gitlab_repo_url ?? '', sha, ref, pushedAt, webhookEventId: eventId })
         if (res.duplicate) duplicates++
         else bound++
       }
@@ -59,12 +67,13 @@ export function createGitlabPlugin(config: Config): ConnectorPlugin {
     id: 'gitlab',
     displayName: 'GitLab',
     webhookPath: '/api/plugins/gitlab/webhook',
+    webhookProjectParam: 'project',
     verifyWebhook(req: FastifyRequest): void {
       if (!config.gitlabWebhookSecret) throw httpError(503, 'NOT_CONFIGURED', 'GITLAB_WEBHOOK_SECRET is not configured')
       if (req.headers['x-gitlab-token'] !== config.gitlabWebhookSecret) throw httpError(401, 'WEBHOOK_SECRET', 'invalid X-Gitlab-Token')
     },
-    handleWebhook(db: DB, payload: any, headers?: Headers) {
-      return handleGitlabPush(db, payload, headers)
+    handleWebhook(db: DB, payload: any, headers?: Headers, ctx?: { projectKey?: string }) {
+      return handleGitlabPush(db, payload, headers, ctx?.projectKey)
     },
     commitUrl(repoUrl: string, sha: string): string {
       return repoUrl.replace(/\.git$/, '') + '/-/commit/' + sha

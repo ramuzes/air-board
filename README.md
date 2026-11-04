@@ -17,7 +17,7 @@ With an empty database the service creates an admin user and prints a one-time b
 
 ## GitLab
 
-In your GitLab project: Settings -> Webhooks -> add <BASE_URL>/api/plugins/gitlab/webhook, push events, secret = GITLAB_WEBHOOK_SECRET. Set the AirBoard project's gitlab_repo_url to the repo's HTTP URL (PATCH /api/projects/KEY). Commit messages mentioning ADR-12, ISSUE-345 etc. are auto-bound.
+In your GitLab project: Settings -> Webhooks -> add <BASE_URL>/api/plugins/gitlab/webhook/<PROJECT_KEY>, push events, secret = GITLAB_WEBHOOK_SECRET (e.g. .../webhook/CORE binds to project CORE; unknown keys get 404). Commit messages mentioning ADR-12, ISSUE-345 etc. are auto-bound. The legacy fixed path /api/plugins/gitlab/webhook still works by matching the payload repo URL against the project's gitlab_repo_url.
 
 ## Agents
 
