@@ -52,6 +52,24 @@ describe('web ui', () => {
     const after = await inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
     expect(after.body).toContain('active')
   })
+  it('renders a specific revision with content and links from the detail page', async () => {
+    const { app, auth, inject } = await setup()
+    await inject({ method: 'POST', url: '/api/projects', headers: auth, payload: { key: 'CORE', name: 'Core' } })
+    await inject({ method: 'POST', url: '/api/projects/CORE/resources', headers: auth, payload: { kind: 'ADR', title: 'T', markdown: 'version one' } })
+    await inject({ method: 'PATCH', url: '/api/projects/CORE/resources/ADR-1', headers: auth, payload: { content_markdown: 'version two' } })
+    const tok = (auth.authorization.match(/Bearer (.+)/) as any)[1]
+    const cookie = 'ab_token=' + tok
+    const page = await inject({ method: 'GET', url: '/p/CORE/ADR-1', headers: { cookie } })
+    expect(page.statusCode).toBe(200)
+    expect(page.body).toContain('href="/p/CORE/ADR-1/r/1"')
+    expect(page.body).toContain('href="/p/CORE/ADR-1/r/2"')
+    const rev1 = await inject({ method: 'GET', url: '/p/CORE/ADR-1/r/1', headers: { cookie } })
+    expect(rev1.statusCode).toBe(200)
+    expect(rev1.body).toContain('<p>version one</p>')
+    expect(rev1.body).not.toContain('<p>version two</p>')
+    const missing = await inject({ method: 'GET', url: '/p/CORE/ADR-1/r/9', headers: { cookie } })
+    expect(missing.statusCode).toBe(404)
+  })
   it('rejects unauthenticated browsing with redirect to /login', async () => {
     const { app, inject } = await setup()
     const res = await inject({ method: 'GET', url: '/' })

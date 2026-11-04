@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import type { DB } from '../../store/db.js'
 import { verifyToken, createToken, revokeToken, listTokens, bindTokenToProjects } from '../../store/users.js'
 import { listProjects, getProjectByKey, createProject, updateProject } from '../../store/projects.js'
-import { getResourceInternal, listResources, updateResource, listRevisions, countResources } from '../../store/resources.js'
+import { getResourceInternal, listResources, updateResource, listRevisions, getRevision, countResources } from '../../store/resources.js'
 import { listBindings } from '../../store/bindings.js'
 import { webSession, canAccessProject } from '../auth.js'
 import { commitUrlFor } from '../../plugins/registry.js'
@@ -129,7 +129,7 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
     const p = projectOr403(db, req, req.params.key)
     const r = getResourceInternal(db, p.id, req.params.id)
     if (!r) throw httpError(404, 'NOT_FOUND', 'resource not found')
-    const revs = listRevisions(db, r.row.id).map((v: any) => '<tr><td>' + v.rev + '</td><td>' + esc(v.title) + '</td><td>' + esc(v.created_at) + '</td></tr>').join('')
+    const revs = listRevisions(db, r.row.id).map((v: any) => '<tr><td><a href="/p/' + esc(p.key) + '/' + r.view.id + '/r/' + v.rev + '">' + v.rev + '</a></td><td>' + esc(v.title) + '</td><td>' + esc(v.created_at) + '</td></tr>').join('')
     const binds = listBindings(db, r.row.id).map((b) => '<tr><td>' + esc(b.repo_url) + '</td><td><code><a href="' + esc(commitUrlFor(b.repo_url, b.sha) ?? '#') + '" target="_blank">' + esc(b.sha) + '</a></code></td><td>' + esc(b.pushed_at ?? '') + '</td></tr>').join('')
     const NEXT: Record<string, string[]> = { draft: ['active', 'cancelled'], active: ['done', 'cancelled'], done: [], cancelled: [] }
     const buttons = NEXT[r.view.status]
@@ -144,6 +144,19 @@ export function registerWebRoutes(app: FastifyInstance, db: DB) {
       '<button>Save (new revision)</button></form>' +
       '<h2>Revisions</h2><table><tr><th>Rev</th><th>Title</th><th>At</th></tr>' + revs + '</table>' +
       '<h2>Commit bindings</h2><table><tr><th>Repo</th><th>SHA</th><th>Pushed</th></tr>' + binds + '</table>')
+  })
+
+  app.get('/p/:key/:id/r/:rev', { preHandler: [requireWeb] }, async (req: any, reply) => {
+    const p = projectOr403(db, req, req.params.key)
+    const r = getResourceInternal(db, p.id, req.params.id)
+    if (!r) throw httpError(404, 'NOT_FOUND', 'resource not found')
+    const v = getRevision(db, r.row.id, Number(req.params.rev))
+    if (!v) throw httpError(404, 'NOT_FOUND', 'revision ' + req.params.rev + ' not found')
+    reply.type('text/html')
+    return layout(r.view.id + ' rev ' + v.rev + ' — ' + v.title,
+      '<p><a href="/p/' + esc(p.key) + '/' + r.view.id + '">&laquo; back to ' + esc(r.view.id) + '</a></p>' +
+      '<p>Revision <strong>' + v.rev + '</strong> of ' + r.view.rev + ' — ' + esc(v.title) + ' — ' + esc(v.created_at) + '</p>' +
+      '<div>' + renderMarkdown(v.content_markdown) + '</div>')
   })
 
   app.post('/p/:key/repo', { preHandler: [requireGlobalWeb] }, async (req: any, reply) => {
